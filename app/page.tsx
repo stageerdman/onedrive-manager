@@ -1,22 +1,53 @@
 import { HardDrive } from "lucide-react";
 import { AppBar } from "@/components/app-bar";
 import { buttonVariants } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { AccountCard } from "@/components/account-card";
+import { GhostAddCard } from "@/components/ghost-add-card";
 import { cn } from "@/lib/utils";
-import { listAccounts } from "@/lib/accounts";
+import { formatBytes } from "@/lib/format";
+import { listAccounts, type Account } from "@/lib/accounts";
+import { getDriveQuota, type DriveQuota } from "@/lib/graph/drive";
+import { ReconnectNeededError } from "@/lib/graph/client";
 
 export const dynamic = "force-dynamic";
+
+const CONNECT_HREF = "/api/auth/login";
+const MAX_SLOTS = 3;
+
+interface AccountView {
+  account: Account;
+  quota: DriveQuota | null;
+  needsReconnect: boolean;
+}
+
+async function loadViews(accounts: Account[]): Promise<AccountView[]> {
+  return Promise.all(
+    accounts.map(async (account) => {
+      if (account.status === "reconnect") return { account, quota: null, needsReconnect: true };
+      try {
+        const quota = await getDriveQuota(account.id);
+        return { account, quota, needsReconnect: false };
+      } catch (err) {
+        return { account, quota: null, needsReconnect: err instanceof ReconnectNeededError };
+      }
+    }),
+  );
+}
 
 export default async function OverviewPage({ searchParams }: PageProps<"/">) {
   const sp = await searchParams;
   const accounts = listAccounts();
-
   const notice = typeof sp.connect_notice === "string" ? sp.connect_notice : null;
   const error = typeof sp.connect_error === "string" ? sp.connect_error : null;
 
+  const views = await loadViews(accounts);
+  const totalFree = views.reduce((sum, v) => sum + (v.quota?.remaining ?? 0), 0);
+  const hasQuota = views.some((v) => v.quota);
+  const freeSlots = Math.max(MAX_SLOTS - accounts.length, 0);
+
   return (
     <>
-      <AppBar connectHref="/api/auth/login" canAdd={accounts.length < 3} />
+      <AppBar connectHref={CONNECT_HREF} canAdd={accounts.length < MAX_SLOTS} />
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
         {notice && (
           <p className="rounded-lg border bg-muted/40 px-4 py-2 text-sm text-muted-foreground">{notice}</p>
@@ -30,23 +61,27 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
         {accounts.length === 0 ? (
           <EmptyState />
         ) : (
-          /* Temporary list — the Phase 3 dashboard replaces this with account cards. */
-          <ul className="flex flex-col gap-2">
-            {accounts.map((a) => (
-              <li
-                key={a.id}
-                className="flex items-center justify-between rounded-xl border px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold">{a.label}</p>
-                  <p className="truncate text-xs text-muted-foreground">{a.email}</p>
-                </div>
-                <Badge variant={a.status === "connected" ? "secondary" : "destructive"}>
-                  {a.status === "connected" ? "Connected" : "Reconnect needed"}
-                </Badge>
-              </li>
-            ))}
-          </ul>
+          <>
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {views.map((v) => (
+                <AccountCard
+                  key={v.account.id}
+                  account={v.account}
+                  quota={v.quota}
+                  needsReconnect={v.needsReconnect}
+                />
+              ))}
+              {Array.from({ length: freeSlots }).map((_, i) => (
+                <GhostAddCard key={`ghost-${i}`} connectHref={CONNECT_HREF} />
+              ))}
+            </div>
+            {hasQuota && (
+              <p className="text-center text-sm text-muted-foreground tabular-nums">
+                Total free across all drives:{" "}
+                <span className="font-semibold text-foreground">{formatBytes(totalFree)}</span>
+              </p>
+            )}
+          </>
         )}
       </main>
     </>
@@ -67,7 +102,7 @@ function EmptyState() {
             your OneDrive accounts.
           </p>
         </div>
-        <a href="/api/auth/login" className={cn(buttonVariants({ size: "lg" }))}>
+        <a href={CONNECT_HREF} className={cn(buttonVariants({ size: "lg" }))}>
           Connect OneDrive
         </a>
         <ul className="space-y-1 text-xs text-muted-foreground">
