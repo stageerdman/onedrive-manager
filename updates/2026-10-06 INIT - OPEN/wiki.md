@@ -48,6 +48,13 @@ learned and decided, and why.
   Microsoft accounts** server-side. The `copy` action needs both drives under one token;
   **upload-from-URL** (`@microsoft.graph.sourceUrl`) is **rejected for consumer OneDrive**:
   tested 2026-10-06 → `400 invalidRequest: "The sourceUrl provided is not supported"`.
+  Re-tested with a `createLink` anonymous sharing link (1drv.ms webUrl) and with
+  `?download=1` — both also 400. The feature is not enabled for these accounts in any
+  URL form; don't re-attempt.
+- **Untried theoretical avenue** (server-side, if ever needed): share the item from A to
+  B, then have B call the Graph `copy` action on the *shared* driveItem into B's own
+  drive — the copy may then run inside Microsoft's cloud. Unverified, complex (sharing +
+  permissions), parked.
 - Therefore a cross-account move **must stream bytes through this machine** (download from
   source → upload to target). It's bandwidth-bound; large folders take real time. The
   engine detects upload-from-URL is unsupported once per move and then streams directly,
