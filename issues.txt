@@ -4,10 +4,11 @@ Running list of open items and decisions-to-make. Newest context at the top of
 each section. See the INIT update in updates/ for the full build roadmap.
 
 ## Blocked on the user (credentials / external setup)
-- [x] Web redirect URI (http://localhost:3000/api/auth/callback) added to the reused
-      RecBar Azure registration (client ID bae96960-…, in .env). Registration is a public
-      client (tenant=consumers, personal accounts) with Files.ReadWrite + offline_access
-      already consented; no client secret (auth-code + PKCE). Azure setup is complete.
+- [x] Azure setup complete and VERIFIED: reused RecBar registration (bae96960-…,
+      tenant=consumers). Run as a confidential "Web" app — redirect under the Web platform +
+      a client secret in .env (AADSTS70002 ruled out the secret-less public-client path). All
+      3 accounts connected 2026-10-06; encrypted refresh tokens stored. Secret expires per the
+      chosen lifetime — rotate in Certificates & secrets before then.
 
 ## Open decisions (to settle in Phase 0/1 of INIT)
 - [x] Persistence store: DECIDED — local SQLite via better-sqlite3 (lib/db.ts), file

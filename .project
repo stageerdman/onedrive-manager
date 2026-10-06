@@ -5,7 +5,7 @@ visibility: private
 created: 2026-10-06
 claude_md_generated: 2026-10-06
 modules: [STRUCTURE, CODING, WORKFLOW, UX]
-secrets: [AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY, AUTH_SECRET]
+secrets: [AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY, AUTH_SECRET]
 ---
 
 # OneDrive Manager
@@ -20,11 +20,13 @@ Stack: Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Microsoft Graph
 MSAL, deployed on Vercel.
 
 ## Secrets
-- `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` — one Azure app registration (reused from RecBar,
-  a public client, `AZURE_TENANT_ID=consumers`) used to connect all accounts. No client
-  secret — auth is the public-client auth-code + PKCE flow. Scopes already consented:
-  `Files.ReadWrite offline_access`.
-- `AZURE_REDIRECT_URI` — OAuth redirect URI (add it to the registration in Azure).
+- `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` — one Azure app registration
+  (reused from RecBar, `AZURE_TENANT_ID=consumers`) used to connect all accounts. Run as a
+  **confidential "Web" app**: Microsoft requires the client secret for the web-redirect code
+  exchange (AADSTS70002 without it); the secret-less public-client path was unreliable for a
+  personal-account web redirect. Auth is auth-code + PKCE + secret. Scopes: `Files.ReadWrite
+  offline_access`.
+- `AZURE_REDIRECT_URI` — OAuth "Web" redirect URI on the registration.
 - `TOKEN_ENCRYPTION_KEY` — encrypts stored OAuth refresh tokens at rest.
 - `AUTH_SECRET` — signs the app's own session/cookie.
 

@@ -86,12 +86,12 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
 ## Secrets (see `.env`, never committed)
-- `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` — one Azure app registration, **reused from RecBar**
-  (`obs-recording-shortcut`). It's a **public client** (`AZURE_TENANT_ID=consumers`,
-  personal accounts), so there is **no client secret** — auth is the auth-code + PKCE flow.
-  Scopes already consented on it: `Files.ReadWrite offline_access`.
-- `AZURE_REDIRECT_URI` — OAuth redirect (`http://localhost:3000/api/auth/callback`); must be
-  added as a Web/SPA redirect URI on the existing registration in the Azure portal.
+- `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` — one Azure app registration,
+  **reused from RecBar** (`obs-recording-shortcut`), `AZURE_TENANT_ID=consumers` (personal
+  accounts). Run as a **confidential "Web" app**: Microsoft requires the client secret for the
+  web-redirect code exchange (we also send PKCE). The secret-less public-client path returned
+  AADSTS70002, so we use Web + secret. Scopes: `Files.ReadWrite offline_access`.
+- `AZURE_REDIRECT_URI` — OAuth "Web" redirect (`http://localhost:3000/api/auth/callback`).
 - `TOKEN_ENCRYPTION_KEY` — encrypts stored OAuth refresh tokens at rest.
 - `AUTH_SECRET` — signs the app's own session/cookie.
 

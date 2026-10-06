@@ -19,11 +19,17 @@ learned and decided, and why.
 
 ## Scope & permissions
 - **Reuse RecBar's Azure registration** (client ID `bae96960-…`, found in
-  `~/Library/Application Support/RecBar/config.json`) instead of creating a new one. It's a
-  **public client** → **no client secret**; we use the **auth-code + PKCE** flow. Registered
-  for **personal accounts only**, so `AZURE_TENANT_ID=consumers` (not `common`). Each account
-  goes through OAuth consent separately. `RecBar/OneDriveAuth.swift` is a working reference
-  for token acquisition/refresh.
+  `~/Library/Application Support/RecBar/config.json`) instead of creating a new one. Registered
+  for **personal accounts only**, so `AZURE_TENANT_ID=consumers` (not `common`).
+- **Confidential "Web" app + client secret (decided after two failed attempts).** We first
+  tried the secret-less public-client auth-code+PKCE flow (RecBar itself is a public client via
+  device code). Microsoft rejected the web-redirect code exchange with **AADSTS70002: "must
+  include a 'client_secret'"** — a "Web"-platform redirect is always treated as confidential,
+  and the secret-less path requires the "Mobile and desktop" platform, which proved unreliable
+  for a personal-account localhost redirect with a path. Resolution: register the redirect under
+  **Web**, create a **client secret**, and send it (plus PKCE) on token exchange + refresh.
+  Verified working: all 3 accounts connected, encrypted refresh tokens stored. RecBar's
+  `OneDriveAuth.swift` (device-code) remains a reference only for token/refresh shape.
 - **Owning account:** the Azure app registration is owned by the personal Microsoft
   account **`s.microsoft@erdman.xyz`** — log in there at entra.microsoft.com to manage it.
   The web redirect URI `http://localhost:3000/api/auth/callback` has been added.

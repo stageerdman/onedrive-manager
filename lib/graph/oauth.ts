@@ -72,24 +72,33 @@ async function postToken(body: Record<string, string>): Promise<TokenResponse> {
   return json as TokenResponse;
 }
 
+/** Include the client secret only when configured (confidential Web app). */
+function withSecret(body: Record<string, string>): Record<string, string> {
+  return env.azureClientSecret ? { ...body, client_secret: env.azureClientSecret } : body;
+}
+
 export function exchangeCode(code: string, verifier: string): Promise<TokenResponse> {
-  return postToken({
-    client_id: env.azureClientId,
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: env.azureRedirectUri,
-    code_verifier: verifier,
-    scope: GRAPH_SCOPES,
-  });
+  return postToken(
+    withSecret({
+      client_id: env.azureClientId,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: env.azureRedirectUri,
+      code_verifier: verifier,
+      scope: GRAPH_SCOPES,
+    }),
+  );
 }
 
 export function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  return postToken({
-    client_id: env.azureClientId,
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-    scope: GRAPH_SCOPES,
-  });
+  return postToken(
+    withSecret({
+      client_id: env.azureClientId,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      scope: GRAPH_SCOPES,
+    }),
+  );
 }
 
 export interface GraphProfile {
