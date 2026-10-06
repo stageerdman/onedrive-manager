@@ -173,14 +173,74 @@ function newItemId(id: string): string | null {
   return r?.new_item_id ?? null;
 }
 
+/**
+ * Drive the move with automatic retry. Because the copy is idempotent (skips files
+ * already on the target), a transient failure just retries the pass and continues —
+ * no user action. It only parks as 'paused' for a manual Resume after many automatic
+ * attempts, or stops immediately on an explicit cancel.
+ */
 async function runMove(
+  id: string,
+  input: { sourceAccount: string; targetAccount: string; itemId: string },
+): Promise<void> {
+  const { targetAccount } = input;
+  const MAX_ATTEMPTS = 25;
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await attemptMove(id, input);
+      return; // success
+    } catch (err) {
+      if (err instanceof MoveCancelled) {
+        await cleanupAfterCancel(id, targetAccount);
+        return;
+      }
+      const message = err instanceof Error ? err.message : "Move failed.";
+      if (attempt >= MAX_ATTEMPTS) {
+        db.prepare(
+          "UPDATE moves SET status = 'paused', error = ?, finished_at = datetime('now') WHERE id = ?",
+        ).run(`${message} — auto-retried ${attempt}×. Click Resume to keep trying.`, id);
+        return;
+      }
+      // Auto-retry (resumes from where it got to). Back off, but keep going.
+      const wait = Math.min(2 ** attempt, 60);
+      db.prepare("UPDATE moves SET status = 'copying', error = ? WHERE id = ?").run(
+        `${message} — retrying automatically (attempt ${attempt + 1})…`,
+        id,
+      );
+      await sleep(wait * 1000);
+      if (cancelled.has(id)) {
+        await cleanupAfterCancel(id, targetAccount);
+        return;
+      }
+    }
+  }
+}
+
+async function cleanupAfterCancel(id: string, targetAccount: string): Promise<void> {
+  const partial = newItemId(id);
+  if (partial) {
+    try {
+      await graphFetch(targetAccount, `/me/drive/items/${partial}`, { method: "DELETE" });
+    } catch {
+      /* leave it */
+    }
+    db.prepare("UPDATE moves SET new_item_id = NULL WHERE id = ?").run(id);
+  }
+  db.prepare(
+    "UPDATE moves SET status = 'cancelled', error = 'Cancelled. Source intact; partial copy removed.', finished_at = datetime('now') WHERE id = ?",
+  ).run(id);
+}
+
+/** One copy→verify→delete pass. Throws on failure (the caller retries). */
+async function attemptMove(
   id: string,
   input: { sourceAccount: string; targetAccount: string; itemId: string },
 ): Promise<void> {
   const { sourceAccount, targetAccount, itemId } = input;
   const progress = { files: 0, bytes: 0 };
 
-  try {
+  {
     const item = await graphJson<DriveItem>(
       sourceAccount,
       `/me/drive/items/${itemId}?$select=id,name,size,folder,file`,
@@ -230,27 +290,6 @@ async function runMove(
       throw new Error(`Copy done but deleting the source failed (${del.status}). Nothing lost — copy is on the target.`);
     }
     db.prepare("UPDATE moves SET status = 'complete', finished_at = datetime('now') WHERE id = ?").run(id);
-  } catch (err) {
-    if (err instanceof MoveCancelled) {
-      const partial = newItemId(id);
-      if (partial) {
-        try {
-          await graphFetch(targetAccount, `/me/drive/items/${partial}`, { method: "DELETE" });
-        } catch {
-          /* leave it */
-        }
-        db.prepare("UPDATE moves SET new_item_id = NULL WHERE id = ?").run(id);
-      }
-      db.prepare(
-        "UPDATE moves SET status = 'cancelled', error = 'Cancelled. Source intact; partial copy removed.', finished_at = datetime('now') WHERE id = ?",
-      ).run(id);
-    } else {
-      // Keep the partial target copy and park as paused → resumable.
-      const message = err instanceof Error ? err.message : "Move failed.";
-      db.prepare(
-        "UPDATE moves SET status = 'paused', error = ?, finished_at = datetime('now') WHERE id = ?",
-      ).run(`${message} — Resume to continue.`, id);
-    }
   }
 }
 
