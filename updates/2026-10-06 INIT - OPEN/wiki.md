@@ -18,11 +18,16 @@ learned and decided, and why.
   "last scanned" timestamp rather than re-walking the tree on every view.
 
 ## Scope & permissions
-- **One Azure app registration** (multi-tenant + personal, `AZURE_TENANT_ID=common`)
-  connects all accounts; each account goes through OAuth consent separately.
-- **Least privilege, staged:** v1 is read-only (`Files.Read.All`). We only request
-  `Files.ReadWrite.All` when we actually build move (Phase 6), then re-consent. Don't ask
-  for write access the app isn't using yet.
+- **Reuse RecBar's Azure registration** (client ID `bae96960-…`, found in
+  `~/Library/Application Support/RecBar/config.json`) instead of creating a new one. It's a
+  **public client** → **no client secret**; we use the **auth-code + PKCE** flow. Registered
+  for **personal accounts only**, so `AZURE_TENANT_ID=consumers` (not `common`). Each account
+  goes through OAuth consent separately. `RecBar/OneDriveAuth.swift` is a working reference
+  for token acquisition/refresh.
+- **Scope is already `Files.ReadWrite offline_access`** on that registration. So the move
+  feature is *permission*-unblocked from the start; keeping v1 read-only is a behaviour
+  decision (don't issue writes yet), not a scope limitation. Only the web redirect URI still
+  needs adding to the registration.
 
 ## Security
 - Refresh tokens are **encrypted at rest** with `TOKEN_ENCRYPTION_KEY` (AES-256). The

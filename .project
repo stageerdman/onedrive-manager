@@ -5,7 +5,7 @@ visibility: private
 created: 2026-10-06
 claude_md_generated: 2026-10-06
 modules: [STRUCTURE, CODING, WORKFLOW, UX]
-secrets: [AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY, AUTH_SECRET]
+secrets: [AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY, AUTH_SECRET]
 ---
 
 # OneDrive Manager
@@ -20,9 +20,11 @@ Stack: Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Microsoft Graph
 MSAL, deployed on Vercel.
 
 ## Secrets
-- `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` — one Azure app
-  registration used to connect all three accounts (`AZURE_TENANT_ID=common`).
-- `AZURE_REDIRECT_URI` — OAuth redirect URI.
+- `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` — one Azure app registration (reused from RecBar,
+  a public client, `AZURE_TENANT_ID=consumers`) used to connect all accounts. No client
+  secret — auth is the public-client auth-code + PKCE flow. Scopes already consented:
+  `Files.ReadWrite offline_access`.
+- `AZURE_REDIRECT_URI` — OAuth redirect URI (add it to the registration in Azure).
 - `TOKEN_ENCRYPTION_KEY` — encrypts stored OAuth refresh tokens at rest.
 - `AUTH_SECRET` — signs the app's own session/cookie.
 

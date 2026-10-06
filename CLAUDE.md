@@ -70,9 +70,10 @@ What it does:
   least-recently-touched items. ("Last used" is derived from Graph's `lastModifiedDateTime` /
   `createdDateTime` — true last-*accessed* time is not available for personal accounts.)
 - **Cross-account move** *(planned — INIT Phase 6)* — move whole folders/files from one account
-  to another to rebalance space. This is the point where scope upgrades from read-only
-  `Files.Read.All` to `Files.ReadWrite.All`; Graph has no native cross-account move, so it's
-  implemented as copy → verify → delete-source. v1 up to the explorer stays read-only.
+  to another to rebalance space. The Azure scope already grants `Files.ReadWrite`, so move is
+  permission-unblocked; it's scheduled late only for its complexity. Graph has no native
+  cross-account move, so it's implemented as copy → verify → delete-source. v1 up to the
+  explorer is read-only by behaviour, not by permission.
 
 Stack: **Next.js (App Router) + TypeScript + Tailwind + shadcn/ui**, Microsoft Graph via MSAL,
 deployed on **Vercel**. Small user-authored data (usernames, descriptions) and scan caches
@@ -85,9 +86,12 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
 ## Secrets (see `.env`, never committed)
-- `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` — one Azure app registration used
-  to connect all three accounts (`AZURE_TENANT_ID=common` for personal + work/school).
-- `AZURE_REDIRECT_URI` — OAuth redirect (e.g. `http://localhost:3000/api/auth/callback`).
+- `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` — one Azure app registration, **reused from RecBar**
+  (`obs-recording-shortcut`). It's a **public client** (`AZURE_TENANT_ID=consumers`,
+  personal accounts), so there is **no client secret** — auth is the auth-code + PKCE flow.
+  Scopes already consented on it: `Files.ReadWrite offline_access`.
+- `AZURE_REDIRECT_URI` — OAuth redirect (`http://localhost:3000/api/auth/callback`); must be
+  added as a Web/SPA redirect URI on the existing registration in the Azure portal.
 - `TOKEN_ENCRYPTION_KEY` — encrypts stored OAuth refresh tokens at rest.
 - `AUTH_SECRET` — signs the app's own session/cookie.
 

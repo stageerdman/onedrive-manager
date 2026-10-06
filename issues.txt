@@ -4,11 +4,12 @@ Running list of open items and decisions-to-make. Newest context at the top of
 each section. See the INIT update in updates/ for the full build roadmap.
 
 ## Blocked on the user (credentials / external setup)
-- [ ] Azure app registration not yet created. The app cannot connect any OneDrive
-      until AZURE_CLIENT_ID / AZURE_CLIENT_SECRET are filled in .env. Steps are in
-      .env comments. Needs: multi-tenant + personal accounts, redirect URI
-      http://localhost:3000/api/auth/callback, delegated scopes User.Read +
-      Files.Read.All + offline_access.
+- [ ] Add a Web/SPA redirect URI (http://localhost:3000/api/auth/callback) to the
+      REUSED RecBar Azure registration (client ID bae96960-… already in .env). That's
+      the only remaining Azure step — the registration exists, is a public client
+      (tenant=consumers, personal accounts), and already has Files.ReadWrite +
+      offline_access consented. No client secret needed (auth-code + PKCE flow).
+      [done: registration reused, AZURE_CLIENT_ID filled from RecBar config.json]
 
 ## Open decisions (to settle in Phase 0/1 of INIT)
 - [ ] Persistence store for refresh tokens + usernames/descriptions + scan caches.
@@ -20,10 +21,10 @@ each section. See the INIT update in updates/ for the full build roadmap.
       createdDateTime and must say so in the UI. Confirm this is acceptable.
 - [ ] App's own gate: whether the personal app needs any login of its own, or just
       runs locally behind the OS. (UX recommendation pending — see INIT.)
-- [ ] Cross-account move (INIT Phase 6): requires upgrading the Azure scope from
-      Files.Read.All to Files.ReadWrite.All and re-consenting each account. Graph has no
-      native cross-account move — implement as copy → verify → delete-source. Deferred:
-      v1 ships read-only analysis first (decided at INIT).
+- [ ] Cross-account move (INIT Phase 6): permission-unblocked — the reused registration
+      already grants Files.ReadWrite, so no scope upgrade / re-consent needed. Graph has no
+      native cross-account move — implement as copy → verify → delete-source. Deferred only
+      for complexity: v1 ships read-only analysis first (decided at INIT).
 
 ## Known constraints
 - Scanning a large OneDrive via Graph is slow (tens of thousands of items, paged).

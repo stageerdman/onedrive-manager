@@ -22,10 +22,15 @@ to rebalance space.
 
 ## Scope decisions (agreed at INIT)
 - **Visibility:** private GitHub repo — personal tool, nothing to publish.
-- **Move capability:** *analysis first, move later.* v1 (Phases 0–5) is **read-only**
-  (`Files.Read.All`). The move feature (Phase 6) is the point at which we upgrade the
-  Azure scope to `Files.ReadWrite.All` and build the cross-account transfer. We don't
-  request write access until we're actually building move.
+- **Azure registration:** *reuse RecBar's existing registration* (client ID
+  `bae96960-…`, from `~/Library/Application Support/RecBar/config.json`). It's a
+  **public client** (tenant `consumers`, personal accounts), so **no client secret** —
+  auth is the **auth-code + PKCE** flow. It already has `Files.ReadWrite offline_access`
+  consented. Only Azure step left: add the web redirect URI to the registration.
+- **Move capability:** *analysis first, move later* — a **behaviour** choice, not a
+  permission one. The scope already grants `Files.ReadWrite`, so move (Phase 6) is
+  permission-unblocked; it's scheduled late purely for its complexity. v1 (Phases 0–5)
+  simply doesn't issue writes.
 
 ## Phased roadmap
 Each phase ends by **verifying the real thing runs**, then a commit. Phases touching a
@@ -40,10 +45,11 @@ this update folder; findings go in `wiki.md`.
 - **Verify:** `npm run dev` serves an empty shell; lint/build clean.
 
 ### Phase 1 — Microsoft Graph OAuth (connect accounts) 🔬 spike first
-- One Azure app registration (multi-tenant + personal), delegated scopes
-  `User.Read Files.Read.All offline_access`.
-- OAuth consent flow that can be repeated to add **each** of the 3+ accounts; store
-  refresh tokens **encrypted at rest** (`TOKEN_ENCRYPTION_KEY`).
+- Reuse RecBar's **public-client** registration; **auth-code + PKCE** (no secret),
+  tenant `consumers`, scopes `Files.ReadWrite offline_access` (already consented).
+- Repeatable consent flow to add **each** of the 3+ accounts; store refresh tokens
+  **encrypted at rest** (`TOKEN_ENCRYPTION_KEY`). RecBar's `OneDriveAuth.swift` is a
+  working reference for the token/refresh handling.
 - **Verify:** connect all 3 real accounts; tokens persist and refresh across restarts.
 
 ### Phase 2 — Account quota + identity
@@ -67,8 +73,8 @@ this update folder; findings go in `wiki.md`.
   `lastModifiedDateTime`, labelled honestly in the UI).
 - **Verify:** biggest/oldest lists match manual spot-checks.
 
-### Phase 6 — Cross-account move 🔬 spike first · **scope upgrade here**
-- Upgrade Azure app to `Files.ReadWrite.All`; re-consent accounts.
+### Phase 6 — Cross-account move 🔬 spike first
+- No scope change needed — `Files.ReadWrite` is already consented from Phase 1.
 - Move whole folders/files between accounts. Graph has **no native cross-account move**:
   implement as copy-to-destination + verify + delete-source (or download→upload for
   large trees), with progress and a safe, reversible-until-confirmed flow.
@@ -89,9 +95,11 @@ this update folder; findings go in `wiki.md`.
 - [ ] Phase 6 — cross-account move (spike, scope upgrade)
 - [ ] Phase 7 — polish & deploy
 
-**Blocked on user:** Azure app registration not yet created — see `issues.txt`. Phase 1
-can't run end-to-end until `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` are filled in `.env`.
+**Blocked on user:** only one small Azure step — add the web redirect URI
+(`http://localhost:3000/api/auth/callback`) to the reused RecBar registration. The
+client ID is already in `.env` and the scopes are already consented, so Phase 1 is
+otherwise unblocked.
 
 ## Next step
-Phase 0: scaffold the Next.js app and settle the persistence store, once the Azure
-credentials path is unblocked (or scaffold now, connect in Phase 1).
+Phase 0: scaffold the Next.js app and settle the persistence store. Phase 1 can proceed
+as soon as the redirect URI is added to the registration.
