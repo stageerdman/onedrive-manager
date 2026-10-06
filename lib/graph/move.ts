@@ -446,7 +446,7 @@ async function copyFile(
     onProgress(size);
     return (await res.json()) as DriveItem;
   }
-  return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl, onProgress);
+  return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl, onProgress, moveId);
 }
 
 async function uploadFromUrl(
@@ -515,6 +515,7 @@ async function streamLargeFile(
   size: number,
   downloadUrl: string,
   onProgress?: (uploaded: number) => void,
+  moveId?: string,
 ): Promise<DriveItem> {
   const session = await graphJson<{ uploadUrl: string }>(
     targetAccount,
@@ -560,10 +561,12 @@ async function streamLargeFile(
   }
 
   while (!done) {
+    if (moveId) throwIfCancelled(moveId); // allow cancelling mid-file
     const { value, done: d } = await reader.read();
     if (value) carry = Buffer.concat([carry, Buffer.from(value)]);
     done = d;
     while (carry.length >= CHUNK) {
+      if (moveId) throwIfCancelled(moveId);
       await put(Buffer.from(carry.subarray(0, CHUNK)), offset);
       offset += CHUNK;
       carry = carry.subarray(CHUNK);
