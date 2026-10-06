@@ -103,7 +103,31 @@ this update folder; findings go in `wiki.md`.
 client ID is already in `.env` and the scopes are already consented, so Phase 1 is
 otherwise unblocked.
 
-## Next step
-Phase 0 is done. Next is **Phase 1 — Microsoft Graph OAuth**: a PKCE auth-code flow
-(spike first) to connect each account and persist encrypted refresh tokens. The Azure
-redirect URI is already added, so this is unblocked.
+## Where we are (handoff — 2026-10-06)
+**Phases 0–7 are built and working against the 3 real accounts.** Connect, overview
+(quota/meters/inline label+description), lazy explorer, analysis, settings, and
+cross-account move are all live and verified.
+
+Key things settled since the roadmap was written:
+- **Scanning is lazy/on-demand** (surface first, each folder loads on open) — the old
+  full-crawl was too slow for big drives. A full scan is an optional button for complete
+  account-wide analysis. Folder/file classification fixed (file iff `file` facet; Personal
+  Vault / packages are folders).
+- **Cross-account move = stream through this machine, period.** R&D proved there is NO
+  server-side path between two separate personal accounts (upload-from-URL → 400; share +
+  copy → 401). See wiki.md "Cross-account move". The move engine is resilient: idempotent/
+  **resumable** (skips files already copied), **auto-retries** transient errors up to 25×,
+  **cancellable mid-file**, live progress in a persistent tracker bar, and deletes the
+  source only after the whole tree verifies.
+- A 64 GB "Jeremy Miner" move was in progress at handoff (~14%, resumable at any time).
+
+## NEXT STEP (resume here)
+1. **Package as a desktop `.app` (Electron).** This is the top priority — the app
+   currently runs as `next dev` in a browser tab, which is fragile (restarts reload the
+   tab, jobs die with the process). Electron gives it its own window, bundles the Node
+   server + native better-sqlite3, and keeps the move engine running in the background.
+2. Finish/verify the Jeremy Miner move (just hit Resume in the tracker; it continues).
+3. Optional deferred polish (see issues.txt): treemap, delta re-scan, offline banner,
+   drag-reorder cards, global account switcher.
+
+To run the app during dev: `cd ~/dev/onedrive-manager && npm run dev` (binds 127.0.0.1:3000).

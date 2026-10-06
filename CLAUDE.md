@@ -96,10 +96,13 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `AUTH_SECRET` — signs the app's own session/cookie.
 
 ## Status
-Project created under AI Control on 2026-10-06. INIT build roadmap in `updates/`.
-**Phase 0 done:** Next.js 16 + React 19 + Tailwind 4 + shadcn/ui app scaffolded, local
-SQLite store (`lib/db.ts`), empty shell builds/lints/serves. Next: Phase 1 (Graph OAuth).
-See `issues.txt` for open items.
+Created under AI Control 2026-10-06. INIT roadmap + handoff in `updates/`.
+**Phases 0–7 built & working** against the 3 real accounts: connect, overview (quota,
+meters, inline label/description), **lazy** explorer + analysis, settings, and
+**cross-account move** (streams through the host — no server-side path exists for separate
+personal accounts; resumable + auto-retry + cancellable + live tracker). Runs as `next dev`
+on 127.0.0.1. **Next: package as an Electron `.app`.** See `issues.txt` and the INIT
+update's "Where we are / Next step" for the full handoff.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

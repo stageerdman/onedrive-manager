@@ -34,13 +34,24 @@ each section. See the INIT update in updates/ for the full build roadmap.
   (braces→micromatch→fast-glob→@next/eslint-plugin-next), a glob DoS that only affects
   linting. `audit fix --force` would downgrade eslint-config-next, so left as-is.
 
-## Needs end-to-end verification (fill in as features land)
-- Verified live: connect (3 accounts), overview quota/meters, scan (progressive),
-  explorer browse/drill-down, biggest files, stale. Build + tsc + lint clean throughout.
-- NOT yet live-tested: cross-account MOVE (it deletes the source after copy, so it was
-  not auto-run on real data). First move should be done by the user on a throwaway file.
-  Code path: copy whole item to target root -> verify each file's size -> delete source;
-  source left intact on any error.
+## Verified live (2026-10-06)
+- Connect (3 accounts), overview quota/meters + inline label/description, LAZY explorer
+  (surface loads instantly, folders load on open), drill-down, biggest files, stale.
+- Cross-account MOVE works via streaming (small file + folder confirmed). It streams
+  through this machine — Microsoft has no server-side path for separate personal accounts
+  (upload-from-URL 400, share+copy 401; see wiki "Cross-account move"). Move engine is
+  resumable (skips done files), auto-retries transient 429/5xx up to 25x, cancellable
+  mid-file, with a persistent progress tracker. Source deleted only after full verify.
+- Build + tsc + lint clean throughout; server binds 127.0.0.1 only.
+
+## In progress (resume anytime)
+- A ~64 GB "Jeremy Miner" move (→ Soren) was mid-flight at handoff. It's resumable: open
+  the app, find it in the tracker (bottom), hit Resume — it skips what's copied and
+  continues. It will be slow (bandwidth-bound, streams through the computer) — expected.
+
+## NEXT (top priority next session)
+- Package as an Electron desktop .app: own window, bundled Node server + native
+  better-sqlite3, background move engine. Removes the browser-tab/dev-server fragility.
 
 ## Deferred polish (from the UX specs; not blocking)
 - Treemap view, delta/incremental re-scan, offline/throttle banners, drag-to-reorder
