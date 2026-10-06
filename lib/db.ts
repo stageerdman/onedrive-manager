@@ -75,6 +75,26 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_items_children ON items (account_id, gen, parent_id);
     CREATE INDEX IF NOT EXISTS idx_items_folder_size ON items (account_id, gen, is_folder, size);
     CREATE INDEX IF NOT EXISTS idx_items_modified ON items (account_id, gen, modified);
+
+    -- Cross-account move jobs. Safe-by-design: copy whole subtree → verify → then
+    -- delete the source. Progress is tracked so the UI can show it and resume context.
+    CREATE TABLE IF NOT EXISTS moves (
+      id              TEXT PRIMARY KEY,
+      source_account  TEXT NOT NULL,
+      target_account  TEXT NOT NULL,
+      item_id         TEXT NOT NULL,
+      item_name       TEXT,
+      is_folder       INTEGER NOT NULL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'copying', -- copying|verifying|deleting|complete|error
+      files_total     INTEGER NOT NULL DEFAULT 0,
+      files_done      INTEGER NOT NULL DEFAULT 0,
+      bytes_total     INTEGER NOT NULL DEFAULT 0,
+      bytes_done      INTEGER NOT NULL DEFAULT 0,
+      new_item_id     TEXT,                            -- id of the copy on the target
+      started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at     TEXT,
+      error           TEXT
+    );
   `);
 }
 

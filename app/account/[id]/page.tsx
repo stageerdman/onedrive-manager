@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronRight, HardDrive } from "lucide-react";
-import { getAccount, type Accent } from "@/lib/accounts";
+import { getAccount, listAccounts, type Accent } from "@/lib/accounts";
 import { getDriveQuota } from "@/lib/graph/drive";
 import { ReconnectNeededError } from "@/lib/graph/client";
 import { getScanState } from "@/lib/graph/scan";
@@ -20,6 +20,7 @@ import { AppBar } from "@/components/app-bar";
 import { AnalysisNav, type ExplorerView } from "@/components/explorer/analysis-nav";
 import { ScanControl } from "@/components/explorer/scan-control";
 import { SizeBarRow } from "@/components/explorer/size-bar-row";
+import type { MoveTarget } from "@/components/explorer/move-menu";
 import { buttonVariants } from "@/components/ui/button";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,11 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
   const sp = await searchParams;
   const account = getAccount(id);
   if (!account) notFound();
+
+  // Other connected accounts are the possible move targets.
+  const moveTargets: MoveTarget[] = listAccounts()
+    .filter((a) => a.id !== id)
+    .map((a) => ({ id: a.id, label: a.label }));
 
   const view: ExplorerView =
     typeof sp.view === "string" && VALID_VIEWS.includes(sp.view as ExplorerView)
@@ -90,9 +96,15 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
           <>
             <AnalysisNav accountId={id} active={view} />
             {view === "browse" ? (
-              <BrowseView accountId={id} folderId={folderParam} accountUsed={used ?? 0} label={account.label} />
+              <BrowseView
+                accountId={id}
+                folderId={folderParam}
+                accountUsed={used ?? 0}
+                label={account.label}
+                moveTargets={moveTargets}
+              />
             ) : (
-              <AnalysisView accountId={id} view={view} />
+              <AnalysisView accountId={id} view={view} moveTargets={moveTargets} />
             )}
           </>
         )}
@@ -110,11 +122,13 @@ function BrowseView({
   folderId,
   accountUsed,
   label,
+  moveTargets,
 }: {
   accountId: string;
   folderId: string | null;
   accountUsed: number;
   label: string;
+  moveTargets: MoveTarget[];
 }) {
   const items = listChildren(accountId, folderId, "size");
   const crumbs = folderId ? breadcrumbs(accountId, folderId) : [];
@@ -152,7 +166,14 @@ function BrowseView({
       ) : (
         <RowList>
           {items.map((it) => (
-            <SizeBarRow key={it.id} accountId={accountId} item={it} maxSize={maxSize} parentSize={parentSize} />
+            <SizeBarRow
+              key={it.id}
+              accountId={accountId}
+              item={it}
+              maxSize={maxSize}
+              parentSize={parentSize}
+              moveTargets={moveTargets}
+            />
           ))}
         </RowList>
       )}
@@ -160,7 +181,15 @@ function BrowseView({
   );
 }
 
-function AnalysisView({ accountId, view }: { accountId: string; view: ExplorerView }) {
+function AnalysisView({
+  accountId,
+  view,
+  moveTargets,
+}: {
+  accountId: string;
+  view: ExplorerView;
+  moveTargets: MoveTarget[];
+}) {
   const items: Item[] =
     view === "files" ? biggestFiles(accountId) : view === "folders" ? biggestFolders(accountId) : staleFiles(accountId);
   const maxSize = items.reduce((m, it) => Math.max(m, it.size), 0);
@@ -186,7 +215,14 @@ function AnalysisView({ accountId, view }: { accountId: string; view: ExplorerVi
       ) : (
         <RowList>
           {items.map((it) => (
-            <SizeBarRow key={it.id} accountId={accountId} item={it} maxSize={maxSize} pathLabel={pathFor(it)} />
+            <SizeBarRow
+              key={it.id}
+              accountId={accountId}
+              item={it}
+              maxSize={maxSize}
+              pathLabel={pathFor(it)}
+              moveTargets={moveTargets}
+            />
           ))}
         </RowList>
       )}

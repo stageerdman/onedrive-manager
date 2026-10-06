@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { HardDrive, Plus } from "lucide-react";
+import { HardDrive, Plus, Settings } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -21,17 +21,26 @@ export function AppBar({
         <HardDrive className="size-5 text-muted-foreground" aria-hidden />
         <span className="text-sm font-semibold tracking-tight">OneDrive Manager</span>
       </Link>
-      {canAdd ? (
-        <a href={connectHref} className={cn(buttonVariants({ size: "sm" }))}>
-          <Plus className="size-4" aria-hidden />
-          Add drive
-        </a>
-      ) : (
-        <span className={cn(buttonVariants({ size: "sm", variant: "secondary" }), "pointer-events-none opacity-50")}>
-          <Plus className="size-4" aria-hidden />
-          All slots full
-        </span>
-      )}
+      <div className="flex items-center gap-2">
+        {canAdd ? (
+          <a href={connectHref} className={cn(buttonVariants({ size: "sm" }))}>
+            <Plus className="size-4" aria-hidden />
+            Add drive
+          </a>
+        ) : (
+          <span className={cn(buttonVariants({ size: "sm", variant: "secondary" }), "pointer-events-none opacity-50")}>
+            <Plus className="size-4" aria-hidden />
+            All slots full
+          </span>
+        )}
+        <Link
+          href="/settings"
+          className={cn(buttonVariants({ size: "icon-sm", variant: "ghost" }))}
+          aria-label="Settings"
+        >
+          <Settings className="size-4" aria-hidden />
+        </Link>
+      </div>
     </header>
   );
 }
