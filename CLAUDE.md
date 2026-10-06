@@ -96,5 +96,17 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `AUTH_SECRET` — signs the app's own session/cookie.
 
 ## Status
-Project created under AI Control on 2026-10-06. INIT scaffold + build roadmap in `updates/`.
-Not yet implemented beyond scaffold. See `issues.txt` for open items.
+Project created under AI Control on 2026-10-06. INIT build roadmap in `updates/`.
+**Phase 0 done:** Next.js 16 + React 19 + Tailwind 4 + shadcn/ui app scaffolded, local
+SQLite store (`lib/db.ts`), empty shell builds/lints/serves. Next: Phase 1 (Graph OAuth).
+See `issues.txt` for open items.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

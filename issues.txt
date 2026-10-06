@@ -4,18 +4,16 @@ Running list of open items and decisions-to-make. Newest context at the top of
 each section. See the INIT update in updates/ for the full build roadmap.
 
 ## Blocked on the user (credentials / external setup)
-- [ ] Add a Web/SPA redirect URI (http://localhost:3000/api/auth/callback) to the
-      REUSED RecBar Azure registration (client ID bae96960-… already in .env). That's
-      the only remaining Azure step — the registration exists, is a public client
-      (tenant=consumers, personal accounts), and already has Files.ReadWrite +
-      offline_access consented. No client secret needed (auth-code + PKCE flow).
-      [done: registration reused, AZURE_CLIENT_ID filled from RecBar config.json]
+- [x] Web redirect URI (http://localhost:3000/api/auth/callback) added to the reused
+      RecBar Azure registration (client ID bae96960-…, in .env). Registration is a public
+      client (tenant=consumers, personal accounts) with Files.ReadWrite + offline_access
+      already consented; no client secret (auth-code + PKCE). Azure setup is complete.
 
 ## Open decisions (to settle in Phase 0/1 of INIT)
-- [ ] Persistence store for refresh tokens + usernames/descriptions + scan caches.
-      Leaning: local SQLite (better-sqlite3) for a personal app; revisit if deployed
-      to Vercel (then a Marketplace store). Tokens always encrypted at rest with
-      TOKEN_ENCRYPTION_KEY.
+- [x] Persistence store: DECIDED — local SQLite via better-sqlite3 (lib/db.ts), file
+      under data/ (gitignored, WAL). Phase 0 holds the account_meta table (display label +
+      description). Tokens/accounts tables + at-rest encryption (TOKEN_ENCRYPTION_KEY) land
+      in Phase 1. Revisit only if deployed to Vercel (→ a Marketplace store).
 - [ ] "Last used" semantics: Microsoft Graph does not expose true last-accessed for
       personal OneDrive. Analysis will derive staleness from lastModifiedDateTime /
       createdDateTime and must say so in the UI. Confirm this is acceptable.
@@ -30,5 +28,11 @@ each section. See the INIT update in updates/ for the full build roadmap.
 - Scanning a large OneDrive via Graph is slow (tens of thousands of items, paged).
   The explorer must scan progressively and cache results with a "last scanned" time.
 
+## Known constraints (dev tooling)
+- `npm audit` reports 5 high-sev advisories in a dev-only chain
+  (braces→micromatch→fast-glob→@next/eslint-plugin-next), a glob DoS that only affects
+  linting. `audit fix --force` would downgrade eslint-config-next, so left as-is.
+
 ## Needs end-to-end verification (fill in as features land)
-- (nothing built yet — scaffold only)
+- Phase 0 verified: production build + typecheck pass, ESLint clean, dev server serves
+  the shell at http://localhost:3000 (200). Nothing user-facing beyond the empty shell.

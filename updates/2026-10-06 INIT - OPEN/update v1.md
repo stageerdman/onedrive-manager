@@ -86,7 +86,9 @@ this update folder; findings go in `wiki.md`.
   (and, if Vercel, swap SQLite for a Marketplace store).
 
 ## Status tracking
-- [ ] Phase 0 — skeleton + persistence decision
+- [x] Phase 0 — skeleton + persistence decision (Next.js 16 + React 19 + Tailwind 4 +
+      shadcn/ui scaffolded; SQLite store via better-sqlite3 in `lib/db.ts`; empty shell
+      builds, lints, and serves 200)
 - [ ] Phase 1 — Graph OAuth connect (spike)
 - [ ] Phase 2 — quota + identity
 - [ ] Phase 3 — overview dashboard
@@ -101,5 +103,6 @@ client ID is already in `.env` and the scopes are already consented, so Phase 1 
 otherwise unblocked.
 
 ## Next step
-Phase 0: scaffold the Next.js app and settle the persistence store. Phase 1 can proceed
-as soon as the redirect URI is added to the registration.
+Phase 0 is done. Next is **Phase 1 — Microsoft Graph OAuth**: a PKCE auth-code flow
+(spike first) to connect each account and persist encrypted refresh tokens. The Azure
+redirect URI is already added, so this is unblocked.

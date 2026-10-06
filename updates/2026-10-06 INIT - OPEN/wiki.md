@@ -24,6 +24,9 @@ learned and decided, and why.
   for **personal accounts only**, so `AZURE_TENANT_ID=consumers` (not `common`). Each account
   goes through OAuth consent separately. `RecBar/OneDriveAuth.swift` is a working reference
   for token acquisition/refresh.
+- **Owning account:** the Azure app registration is owned by the personal Microsoft
+  account **`s.microsoft@erdman.xyz`** — log in there at entra.microsoft.com to manage it.
+  The web redirect URI `http://localhost:3000/api/auth/callback` has been added.
 - **Scope is already `Files.ReadWrite offline_access`** on that registration. So the move
   feature is *permission*-unblocked from the start; keeping v1 read-only is a behaviour
   decision (don't issue writes yet), not a scope limitation. Only the web redirect URI still
