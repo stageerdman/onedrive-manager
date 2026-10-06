@@ -1,0 +1,31 @@
+---
+name: OneDrive Manager
+github: https://github.com/stageerdman/onedrive-manager
+visibility: private
+created: 2026-10-06
+claude_md_generated: 2026-10-06
+modules: [STRUCTURE, CODING, WORKFLOW, UX]
+secrets: [AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_REDIRECT_URI, TOKEN_ENCRYPTION_KEY, AUTH_SECRET]
+---
+
+# OneDrive Manager
+
+A personal, single-user web app that connects the owner's **three personal OneDrive
+accounts** via Microsoft Graph OAuth and turns them into one storage command centre.
+Core job: answer "where do I have free space, and what's eating it?" in seconds, then
+drill into any account for folder structure with sizes, file/folder age, and the
+biggest or longest-untouched items.
+
+Stack: Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Microsoft Graph via
+MSAL, deployed on Vercel.
+
+## Secrets
+- `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` — one Azure app
+  registration used to connect all three accounts (`AZURE_TENANT_ID=common`).
+- `AZURE_REDIRECT_URI` — OAuth redirect URI.
+- `TOKEN_ENCRYPTION_KEY` — encrypts stored OAuth refresh tokens at rest.
+- `AUTH_SECRET` — signs the app's own session/cookie.
+
+## Status
+Created under AI Control on 2026-10-06. INIT scaffold + build roadmap in `updates/`;
+not yet implemented beyond scaffold. See `issues.txt` for open items.
