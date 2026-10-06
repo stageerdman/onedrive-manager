@@ -89,13 +89,14 @@ this update folder; findings go in `wiki.md`.
 - [x] Phase 0 — skeleton + persistence decision (Next.js 16 + React 19 + Tailwind 4 +
       shadcn/ui scaffolded; SQLite store via better-sqlite3 in `lib/db.ts`; empty shell
       builds, lints, and serves 200)
-- [ ] Phase 1 — Graph OAuth connect (spike)
-- [ ] Phase 2 — quota + identity
-- [ ] Phase 3 — overview dashboard
-- [ ] Phase 4 — drive scan (spike)
-- [ ] Phase 5 — explorer & analysis
-- [ ] Phase 6 — cross-account move (spike, scope upgrade)
-- [ ] Phase 7 — polish & deploy
+- [x] Phase 1 — Graph OAuth connect (confidential Web + secret; 3 accounts connected)
+- [x] Phase 2 — quota + identity (live free/used/total)
+- [x] Phase 3 — overview dashboard (meters, inline label/description, aggregate)
+- [x] Phase 4 — drive scan + cached snapshot (generations, progressive)
+- [x] Phase 5 — explorer & analysis (browse/drill, biggest files/folders, stale)
+- [x] Phase 6 — cross-account move (copy→verify→delete; needs a live user test)
+- [x] Phase 7 — settings/disconnect/clear-cache, 127.0.0.1 binding
+      (deferred polish: treemap, delta re-scan, offline banner, drag-reorder, account switcher)
 
 **Blocked on user:** only one small Azure step — add the web redirect URI
 (`http://localhost:3000/api/auth/callback`) to the reused RecBar registration. The

@@ -35,5 +35,13 @@ each section. See the INIT update in updates/ for the full build roadmap.
   linting. `audit fix --force` would downgrade eslint-config-next, so left as-is.
 
 ## Needs end-to-end verification (fill in as features land)
-- Phase 0 verified: production build + typecheck pass, ESLint clean, dev server serves
-  the shell at http://localhost:3000 (200). Nothing user-facing beyond the empty shell.
+- Verified live: connect (3 accounts), overview quota/meters, scan (progressive),
+  explorer browse/drill-down, biggest files, stale. Build + tsc + lint clean throughout.
+- NOT yet live-tested: cross-account MOVE (it deletes the source after copy, so it was
+  not auto-run on real data). First move should be done by the user on a throwaway file.
+  Code path: copy whole item to target root -> verify each file's size -> delete source;
+  source left intact on any error.
+
+## Deferred polish (from the UX specs; not blocking)
+- Treemap view, delta/incremental re-scan, offline/throttle banners, drag-to-reorder
+  cards, global account switcher in the shell, file-detail popover.
