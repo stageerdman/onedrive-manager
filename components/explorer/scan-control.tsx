@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Loader2 } from "lucide-react";
+import { RefreshCw, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatBytes, formatRelativeDate } from "@/lib/format";
 import type { ScanState } from "@/lib/graph/scan";
@@ -17,7 +17,9 @@ export function ScanControl({ accountId, initial }: { accountId: string; initial
   const [state, setState] = useState<ScanState>(initial);
   const polling = useRef(false);
 
-  const isScanning = state.isRunning || state.status === "scanning";
+  // Key the spinner off the in-memory running flag, not the DB status — so a scan
+  // interrupted by a restart/stall shows "Re-scan" instead of spinning forever.
+  const isScanning = state.isRunning;
 
   useEffect(() => {
     if (!isScanning || polling.current) return;
@@ -55,11 +57,22 @@ export function ScanControl({ accountId, initial }: { accountId: string; initial
     router.refresh();
   }
 
+  async function cancel() {
+    await fetch(`/api/accounts/${accountId}/scan`, { method: "DELETE" });
+    const res = await fetch(`/api/accounts/${accountId}/scan`, { cache: "no-store" });
+    setState(await res.json());
+    router.refresh();
+  }
+
   if (isScanning) {
     return (
       <span className="inline-flex items-center gap-2 text-sm text-muted-foreground tabular-nums">
         <Loader2 className="size-4 animate-spin" aria-hidden />
         Scanning… {state.itemsCount.toLocaleString()} items, {formatBytes(state.bytesCount)}
+        <Button size="xs" variant="ghost" onClick={cancel}>
+          <X className="size-3.5" aria-hidden />
+          Cancel
+        </Button>
       </span>
     );
   }

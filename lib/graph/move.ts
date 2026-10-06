@@ -20,6 +20,25 @@ const CHUNK = 327_680 * 20;
 const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
 
 const running = new Set<string>();
+const cancelled = new Set<string>();
+
+class MoveCancelled extends Error {
+  constructor() {
+    super("Move cancelled.");
+    this.name = "MoveCancelled";
+  }
+}
+
+/** Request cancellation; the running job notices at the next checkpoint (~3s). */
+export function cancelMove(id: string): boolean {
+  if (!running.has(id)) return false;
+  cancelled.add(id);
+  return true;
+}
+
+function throwIfCancelled(id: string): void {
+  if (cancelled.has(id)) throw new MoveCancelled();
+}
 
 interface DriveItem {
   id: string;
@@ -37,7 +56,7 @@ interface ChildrenPage {
 
 export interface MoveState {
   id: string;
-  status: "copying" | "verifying" | "deleting" | "complete" | "error";
+  status: "copying" | "verifying" | "deleting" | "complete" | "error" | "cancelled";
   itemName: string | null;
   isFolder: boolean;
   filesDone: number;
@@ -45,6 +64,7 @@ export interface MoveState {
   bytesDone: number;
   error: string | null;
   finishedAt: string | null;
+  isRunning: boolean;
 }
 
 interface MoveRow {
@@ -72,6 +92,7 @@ export function getMoveState(id: string): MoveState | null {
     bytesDone: r.bytes_done,
     error: r.error,
     finishedAt: r.finished_at,
+    isRunning: running.has(r.id),
   };
 }
 
@@ -86,7 +107,10 @@ export function startMove(input: {
      VALUES (?, ?, ?, ?, 'copying')`,
   ).run(id, input.sourceAccount, input.targetAccount, input.itemId);
   running.add(id);
-  void runMove(id, input).finally(() => running.delete(id));
+  void runMove(id, input).finally(() => {
+    running.delete(id);
+    cancelled.delete(id);
+  });
   return id;
 }
 
@@ -127,10 +151,29 @@ async function runMove(
 
     db.prepare("UPDATE moves SET status = 'complete', finished_at = datetime('now') WHERE id = ?").run(id);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Move failed.";
-    db.prepare(
-      "UPDATE moves SET status = 'error', error = ?, finished_at = datetime('now') WHERE id = ?",
-    ).run(message, id);
+    // Best-effort: remove the partial copy we created on the target so a retry
+    // doesn't accumulate "… 1", "… 2" duplicates. Never touches the source.
+    const row = db.prepare("SELECT new_item_id FROM moves WHERE id = ?").get(id) as
+      | { new_item_id: string | null }
+      | undefined;
+    if (row?.new_item_id) {
+      try {
+        await graphFetch(targetAccount, `/me/drive/items/${row.new_item_id}`, { method: "DELETE" });
+      } catch {
+        /* leave it; user can clean up */
+      }
+    }
+
+    if (err instanceof MoveCancelled) {
+      db.prepare(
+        "UPDATE moves SET status = 'cancelled', error = 'Cancelled. Source left intact; partial copy on the target removed.', finished_at = datetime('now') WHERE id = ?",
+      ).run(id);
+    } else {
+      const message = err instanceof Error ? err.message : "Move failed.";
+      db.prepare(
+        "UPDATE moves SET status = 'error', error = ?, finished_at = datetime('now') WHERE id = ?",
+      ).run(message, id);
+    }
   }
 }
 
@@ -144,6 +187,7 @@ async function copyInto(
   progress: { files: number; bytes: number },
   onRoot?: (newId: string) => void,
 ): Promise<void> {
+  throwIfCancelled(moveId);
   const name = item.name ?? "(unnamed)";
 
   if (item.folder) {
@@ -278,6 +322,7 @@ async function uploadFromUrl(
   const MAX_MS = 6 * 60 * 60 * 1000; // 6h
   while (Date.now() - started < MAX_MS) {
     await new Promise((r) => setTimeout(r, 3000));
+    throwIfCancelled(moveId);
     const mon = await fetch(monitorUrl, { redirect: "manual", headers: { Accept: "application/json" } });
 
     // Completed via redirect to the new item.

@@ -47,17 +47,15 @@ export function MoveMenu({
 
   // Poll an in-flight move.
   useEffect(() => {
-    if (!move || move.status === "complete" || move.status === "error") return;
+    if (!move || move.status === "complete" || move.status === "error" || move.status === "cancelled") return;
     const timer = setInterval(async () => {
       try {
         const res = await fetch(`/api/moves/${move.id}`, { cache: "no-store" });
         const next: MoveState = await res.json();
         setMove(next);
-        if (next.status === "complete") {
+        if (next.status === "complete" || next.status === "error" || next.status === "cancelled") {
           clearInterval(timer);
-          router.refresh();
-        } else if (next.status === "error") {
-          clearInterval(timer);
+          if (next.status === "complete") router.refresh();
         }
       } catch {
         /* transient */
@@ -65,6 +63,11 @@ export function MoveMenu({
     }, 1500);
     return () => clearInterval(timer);
   }, [move, router]);
+
+  async function cancelMove() {
+    if (!move) return;
+    await fetch(`/api/moves/${move.id}/cancel`, { method: "POST" });
+  }
 
   async function begin(target: MoveTarget) {
     const res = await fetch(`/api/accounts/${sourceAccountId}/move`, {
@@ -96,12 +99,23 @@ export function MoveMenu({
         </span>
       );
     }
+    if (move.status === "cancelled") {
+      return <span className="text-xs text-muted-foreground">Cancelled</span>;
+    }
     const label =
       move.status === "deleting" ? "Removing original…" : move.status === "verifying" ? "Verifying…" : "Copying…";
+    const pct = move.bytesTotal > 0 ? Math.round((move.bytesDone / move.bytesTotal) * 100) : 0;
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground tabular-nums">
+      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums">
         <Loader2 className="size-3.5 animate-spin" aria-hidden /> {label}{" "}
-        {move.bytesTotal > 0 ? formatBytes(move.bytesDone) : ""}
+        {move.bytesTotal > 0 ? `${formatBytes(move.bytesDone)} (${pct}%)` : ""}
+        <button
+          type="button"
+          onClick={cancelMove}
+          className="rounded-md px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
+        >
+          Cancel
+        </button>
       </span>
     );
   }

@@ -14,6 +14,14 @@ import { graphJson } from "@/lib/graph/client";
  */
 
 const running = new Set<string>();
+const cancelled = new Set<string>();
+
+/** Request cancellation of a running scan; it stops after the current folder. */
+export function cancelScan(accountId: string): boolean {
+  if (!running.has(accountId)) return false;
+  cancelled.add(accountId);
+  return true;
+}
 
 interface DriveItem {
   id: string;
@@ -131,6 +139,7 @@ async function runScan(accountId: string): Promise<void> {
   const queue: string[] = [rootId];
   try {
     while (queue.length > 0) {
+      if (cancelled.has(accountId)) throw new ScanCancelled();
       const folderId = queue.shift()!;
       let url: string | null =
         `/me/drive/items/${folderId}/children?$top=200&$select=${SELECT_FIELDS}`;
@@ -188,10 +197,26 @@ async function runScan(accountId: string): Promise<void> {
     ).run(gen, itemsCount, bytesCount, accountId);
     db.prepare("DELETE FROM items WHERE account_id = ? AND gen != ?").run(accountId, gen);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Scan failed.";
-    // Keep whatever we gathered, mark partial so the UI can offer Resume.
+    // Commit what we gathered as a browsable partial snapshot, and prune others.
+    const cancelledByUser = err instanceof ScanCancelled;
+    const message = cancelledByUser
+      ? "Scan cancelled — showing what was scanned so far."
+      : err instanceof Error
+        ? err.message
+        : "Scan failed.";
     db.prepare(
-      `UPDATE scans SET status = 'partial', error = ?, finished_at = datetime('now') WHERE account_id = ?`,
-    ).run(message, accountId);
+      `UPDATE scans SET status = 'partial', committed_gen = ?, scanning_gen = NULL, error = ?,
+         items_count = ?, bytes_count = ?, finished_at = datetime('now') WHERE account_id = ?`,
+    ).run(gen, message, itemsCount, bytesCount, accountId);
+    db.prepare("DELETE FROM items WHERE account_id = ? AND gen != ?").run(accountId, gen);
+  } finally {
+    cancelled.delete(accountId);
+  }
+}
+
+class ScanCancelled extends Error {
+  constructor() {
+    super("Scan cancelled.");
+    this.name = "ScanCancelled";
   }
 }
