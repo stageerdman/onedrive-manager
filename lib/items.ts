@@ -1,5 +1,4 @@
 import { db } from "@/lib/db";
-import { getScanState } from "@/lib/graph/scan";
 
 /** A cached drive item as the explorer consumes it. */
 export interface Item {
@@ -40,17 +39,17 @@ function toItem(r: ItemRow): Item {
   };
 }
 
-const COLS =
-  "item_id, parent_id, name, is_folder, size, child_count, mime_type, created, modified";
+const COLS = "item_id, parent_id, name, is_folder, size, child_count, mime_type, created, modified";
+
+/** Synchronously read the cached root id (ensureChildren/getRootId populates it). */
+export function readRootId(accountId: string): string | null {
+  const row = db.prepare("SELECT root_id FROM scans WHERE account_id = ?").get(accountId) as
+    | { root_id: string | null }
+    | undefined;
+  return row?.root_id ?? null;
+}
 
 export type ChildSort = "size" | "name" | "modified" | "created";
-
-/** Context for a folder view: the read generation + resolved folder id. */
-function readContext(accountId: string): { gen: number; rootId: string } | null {
-  const scan = getScanState(accountId);
-  if (scan.readGen == null || scan.rootId == null) return null;
-  return { gen: scan.readGen, rootId: scan.rootId };
-}
 
 const ORDER: Record<ChildSort, string> = {
   size: "is_folder DESC, size DESC",
@@ -65,36 +64,28 @@ export function listChildren(
   folderId: string | null,
   sort: ChildSort = "size",
 ): Item[] {
-  const ctx = readContext(accountId);
-  if (!ctx) return [];
-  const parent = folderId ?? ctx.rootId;
+  const parent = folderId ?? readRootId(accountId);
+  if (!parent) return [];
   return db
-    .prepare(
-      `SELECT ${COLS} FROM items
-       WHERE account_id = ? AND gen = ? AND parent_id = ?
-       ORDER BY ${ORDER[sort]}`,
-    )
-    .all(accountId, ctx.gen, parent)
+    .prepare(`SELECT ${COLS} FROM items WHERE account_id = ? AND parent_id = ? ORDER BY ${ORDER[sort]}`)
+    .all(accountId, parent)
     .map((r) => toItem(r as ItemRow));
 }
 
 export function getItem(accountId: string, itemId: string): Item | null {
-  const ctx = readContext(accountId);
-  if (!ctx) return null;
   const row = db
-    .prepare(`SELECT ${COLS} FROM items WHERE account_id = ? AND gen = ? AND item_id = ?`)
-    .get(accountId, ctx.gen, itemId) as ItemRow | undefined;
+    .prepare(`SELECT ${COLS} FROM items WHERE account_id = ? AND item_id = ?`)
+    .get(accountId, itemId) as ItemRow | undefined;
   return row ? toItem(row) : null;
 }
 
 /** Path from root (exclusive) down to and including `itemId`. */
 export function breadcrumbs(accountId: string, itemId: string): Item[] {
-  const ctx = readContext(accountId);
-  if (!ctx) return [];
+  const rootId = readRootId(accountId);
   const chain: Item[] = [];
   let currentId: string | null = itemId;
   const seen = new Set<string>();
-  while (currentId && currentId !== ctx.rootId && !seen.has(currentId)) {
+  while (currentId && currentId !== rootId && !seen.has(currentId)) {
     seen.add(currentId);
     const node = getItem(accountId, currentId);
     if (!node) break;
@@ -104,48 +95,38 @@ export function breadcrumbs(accountId: string, itemId: string): Item[] {
   return chain;
 }
 
-/** Account-wide files by size (spec #2 §5 "Biggest files"). */
-export function biggestFiles(accountId: string, limit = 100): Item[] {
-  const ctx = readContext(accountId);
-  if (!ctx) return [];
-  return db
-    .prepare(
-      `SELECT ${COLS} FROM items
-       WHERE account_id = ? AND gen = ? AND is_folder = 0
-       ORDER BY size DESC LIMIT ?`,
-    )
-    .all(accountId, ctx.gen, limit)
-    .map((r) => toItem(r as ItemRow));
-}
-
-/** Account-wide folders by recursive size (spec #2 §5 "Biggest folders"). */
-export function biggestFolders(accountId: string, limit = 100): Item[] {
-  const ctx = readContext(accountId);
-  if (!ctx) return [];
-  return db
-    .prepare(
-      `SELECT ${COLS} FROM items
-       WHERE account_id = ? AND gen = ? AND is_folder = 1 AND parent_id != ?
-       ORDER BY size DESC LIMIT ?`,
-    )
-    .all(accountId, ctx.gen, ctx.rootId, limit)
-    .map((r) => toItem(r as ItemRow));
-}
-
 /**
- * Stale files ranked by "Cleanup score" = size × age (spec #2 §5) — the single
- * most actionable ranking: big and long-untouched floats to the top. Age derived
- * from `modified` (the honest proxy; true last-accessed isn't available).
+ * Account-wide analysis over whatever is cached. With lazy browsing this covers the
+ * folders opened so far; a full scan makes it complete. The root row is excluded.
  */
-export function staleFiles(accountId: string, limit = 100): Item[] {
-  const ctx = readContext(accountId);
-  if (!ctx) return [];
+export function biggestFiles(accountId: string, limit = 100): Item[] {
+  return db
+    .prepare(
+      `SELECT ${COLS} FROM items WHERE account_id = ? AND is_folder = 0 ORDER BY size DESC LIMIT ?`,
+    )
+    .all(accountId, limit)
+    .map((r) => toItem(r as ItemRow));
+}
+
+export function biggestFolders(accountId: string, limit = 100): Item[] {
   return db
     .prepare(
       `SELECT ${COLS} FROM items
-       WHERE account_id = ? AND gen = ? AND is_folder = 0 AND modified IS NOT NULL
+       WHERE account_id = ? AND is_folder = 1 AND parent_id IS NOT NULL
+       ORDER BY size DESC LIMIT ?`,
+    )
+    .all(accountId, limit)
+    .map((r) => toItem(r as ItemRow));
+}
+
+/** Stale files by "Cleanup score" = size × age (age from `modified`, the honest proxy). */
+export function staleFiles(accountId: string, limit = 100): Item[] {
+  return db
+    .prepare(
+      `SELECT ${COLS} FROM items
+       WHERE account_id = ? AND is_folder = 0 AND modified IS NOT NULL
        ORDER BY size * (julianday('now') - julianday(modified)) DESC LIMIT ?`,
     )
-    .all(accountId, ctx.gen, limit)
+    .all(accountId, limit)
     .map((r) => toItem(r as ItemRow));
 }

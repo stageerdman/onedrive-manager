@@ -2,26 +2,17 @@ import { db } from "@/lib/db";
 import { graphJson } from "@/lib/graph/client";
 
 /**
- * Recursive drive crawl into the cached `items` snapshot (spec #2 §8). The
- * explorer always reads the cache, never live Graph — this is the only writer.
+ * Lazy drive caching. The explorer loads **one folder level at a time**: a folder's
+ * direct children are fetched from Graph the first time it's opened and cached, so
+ * a big drive is instantly browsable at the surface and deeper folders fill in as
+ * you go — no up-front full crawl.
  *
- * Generations: a scan fills `scanning_gen`; on success it becomes `committed_gen`
- * and older generations are pruned, so a re-scan never destroys the snapshot the
- * explorer is currently showing.
+ * OneDrive reports each folder's `size` as the recursive rollup of its contents, so
+ * per-folder sizes are correct even when only one level has been fetched.
  *
- * Runs in-process, fire-and-forget (fine for a local single-process app). A
- * module-level set guards against two concurrent scans of the same account.
+ * An optional **full scan** walks everything (for account-wide analysis). It reuses
+ * the same per-folder fetch and is cancellable.
  */
-
-const running = new Set<string>();
-const cancelled = new Set<string>();
-
-/** Request cancellation of a running scan; it stops after the current folder. */
-export function cancelScan(accountId: string): boolean {
-  if (!running.has(accountId)) return false;
-  cancelled.add(accountId);
-  return true;
-}
 
 interface DriveItem {
   id: string;
@@ -29,6 +20,7 @@ interface DriveItem {
   size?: number;
   folder?: { childCount?: number };
   file?: { mimeType?: string };
+  package?: unknown;
   parentReference?: { id?: string };
   createdDateTime?: string;
   lastModifiedDateTime?: string;
@@ -39,184 +31,189 @@ interface ChildrenPage {
   "@odata.nextLink"?: string;
 }
 
-export interface ScanState {
-  status: "idle" | "scanning" | "complete" | "partial" | "error";
-  itemsCount: number;
-  bytesCount: number;
-  startedAt: string | null;
-  finishedAt: string | null;
-  error: string | null;
-  /** The generation the explorer should read (committed, else in-progress). */
-  readGen: number | null;
-  rootId: string | null;
-  isRunning: boolean;
+/**
+ * Folder vs file: an item is a FILE only if it carries a `file` facet. Everything
+ * else — plain folders, OneNote/packages, bundles, and special folders like
+ * Personal Vault (which lack a `folder` facet) — is treated as a container.
+ */
+function isFolderItem(it: DriveItem): boolean {
+  return !it.file;
 }
 
-interface ScanRow {
-  root_id: string | null;
-  committed_gen: number | null;
-  scanning_gen: number | null;
-  status: ScanState["status"];
-  items_count: number;
-  bytes_count: number;
-  started_at: string | null;
-  finished_at: string | null;
-  error: string | null;
-}
-
-export function getScanState(accountId: string): ScanState {
-  const row = db.prepare("SELECT * FROM scans WHERE account_id = ?").get(accountId) as
-    | ScanRow
+/** Resolve (and cache) the drive's root item id. */
+export async function getRootId(accountId: string): Promise<string> {
+  const row = db.prepare("SELECT root_id FROM scans WHERE account_id = ?").get(accountId) as
+    | { root_id: string | null }
     | undefined;
-  if (!row) {
-    return {
-      status: "idle",
-      itemsCount: 0,
-      bytesCount: 0,
-      startedAt: null,
-      finishedAt: null,
-      error: null,
-      readGen: null,
-      rootId: null,
-      isRunning: running.has(accountId),
-    };
-  }
-  return {
-    status: row.status,
-    itemsCount: row.items_count,
-    bytesCount: row.bytes_count,
-    startedAt: row.started_at,
-    finishedAt: row.finished_at,
-    error: row.error,
-    readGen: row.committed_gen ?? row.scanning_gen,
-    rootId: row.root_id,
-    isRunning: running.has(accountId),
-  };
+  if (row?.root_id) return row.root_id;
+
+  const root = await graphJson<DriveItem>(accountId, "/me/drive/root?$select=id,name,size,folder");
+  db.prepare(
+    `INSERT INTO scans (account_id, root_id) VALUES (?, ?)
+     ON CONFLICT(account_id) DO UPDATE SET root_id = excluded.root_id`,
+  ).run(accountId, root.id);
+  // Store the root as an item row so children_fetched/breadcrumbs work uniformly.
+  db.prepare(
+    `INSERT INTO items (account_id, item_id, parent_id, name, is_folder, size, child_count, children_fetched)
+     VALUES (@a, @id, NULL, @name, 1, @size, @cc, 0)
+     ON CONFLICT(account_id, item_id) DO UPDATE SET size = @size, child_count = @cc`,
+  ).run({ a: accountId, id: root.id, name: root.name ?? "OneDrive", size: root.size ?? 0, cc: root.folder?.childCount ?? 0 });
+  return root.id;
 }
 
-const insertItem = () =>
+const upsertChild = () =>
   db.prepare(
-    `INSERT OR REPLACE INTO items
-       (account_id, gen, item_id, parent_id, name, is_folder, size, child_count, mime_type, created, modified)
-     VALUES (@account_id, @gen, @item_id, @parent_id, @name, @is_folder, @size, @child_count, @mime_type, @created, @modified)`,
+    `INSERT INTO items
+       (account_id, item_id, parent_id, name, is_folder, size, child_count, mime_type, created, modified, children_fetched)
+     VALUES (@account_id, @item_id, @parent_id, @name, @is_folder, @size, @child_count, @mime_type, @created, @modified, 0)
+     ON CONFLICT(account_id, item_id) DO UPDATE SET
+       parent_id = @parent_id, name = @name, is_folder = @is_folder, size = @size,
+       child_count = @child_count, mime_type = @mime_type, created = @created, modified = @modified`,
   );
 
-/** Start a scan unless one is already running for this account. */
-export function startScan(accountId: string): void {
-  if (running.has(accountId)) return;
-  running.add(accountId);
-  // Fire-and-forget; errors are captured into the scans row.
-  void runScan(accountId).finally(() => running.delete(accountId));
-}
+/**
+ * Ensure a folder's direct children are cached, fetching live only when needed.
+ * `force` re-fetches even if cached (the per-folder "refresh"). Returns the
+ * resolved folder id. Safe to call on every explorer render.
+ */
+export async function ensureChildren(
+  accountId: string,
+  folderId: string | null,
+  opts: { force?: boolean } = {},
+): Promise<string> {
+  const targetId = folderId ?? (await getRootId(accountId));
 
-async function runScan(accountId: string): Promise<void> {
-  const prev = db.prepare("SELECT committed_gen FROM scans WHERE account_id = ?").get(accountId) as
-    | { committed_gen: number | null }
-    | undefined;
-  const gen = (prev?.committed_gen ?? 0) + 1;
+  const meta = db
+    .prepare("SELECT children_fetched FROM items WHERE account_id = ? AND item_id = ?")
+    .get(accountId, targetId) as { children_fetched: number } | undefined;
+  if (!opts.force && meta?.children_fetched) return targetId;
 
-  // Resolve the drive root.
-  const root = await graphJson<DriveItem>(accountId, "/me/drive/root?$select=id,name");
-  const rootId = root.id;
-
-  db.prepare(
-    `INSERT INTO scans (account_id, root_id, scanning_gen, status, items_count, bytes_count, started_at, finished_at, error)
-     VALUES (@account_id, @root_id, @gen, 'scanning', 0, 0, datetime('now'), NULL, NULL)
-     ON CONFLICT(account_id) DO UPDATE SET
-       root_id = @root_id, scanning_gen = @gen, status = 'scanning',
-       items_count = 0, bytes_count = 0, started_at = datetime('now'),
-       finished_at = NULL, error = NULL`,
-  ).run({ account_id: accountId, root_id: rootId, gen });
-
-  const stmt = insertItem();
-  const SELECT_FIELDS =
-    "id,name,size,folder,file,parentReference,createdDateTime,lastModifiedDateTime";
-  let itemsCount = 0;
-  let bytesCount = 0;
-
-  // Batch-insert each folder's children in a transaction, then recurse into
-  // subfolders breadth-first.
-  const queue: string[] = [rootId];
-  try {
-    while (queue.length > 0) {
-      if (cancelled.has(accountId)) throw new ScanCancelled();
-      const folderId = queue.shift()!;
-      let url: string | null =
-        `/me/drive/items/${folderId}/children?$top=200&$select=${SELECT_FIELDS}`;
-      let absolute = false;
-
-      while (url) {
-        const page: ChildrenPage = await graphJson<ChildrenPage>(accountId, url, { absolute });
-        const children = page.value ?? [];
-        const subfolders: string[] = [];
-
-        const insertBatch = db.transaction((rows: DriveItem[]) => {
-          for (const it of rows) {
-            const isFolder = it.folder ? 1 : 0;
-            stmt.run({
-              account_id: accountId,
-              gen,
-              item_id: it.id,
-              parent_id: it.parentReference?.id ?? folderId,
-              name: it.name ?? "(unnamed)",
-              is_folder: isFolder,
-              size: it.size ?? 0,
-              child_count: it.folder?.childCount ?? 0,
-              mime_type: it.file?.mimeType ?? null,
-              created: it.createdDateTime ?? null,
-              modified: it.lastModifiedDateTime ?? null,
-            });
-            if (isFolder) {
-              subfolders.push(it.id);
-            } else {
-              bytesCount += it.size ?? 0;
-            }
-            itemsCount++;
-          }
-        });
-        insertBatch(children);
-        queue.push(...subfolders);
-
-        const next = page["@odata.nextLink"];
-        url = next ?? null;
-        absolute = !!next;
-      }
-
-      // Progress heartbeat after each folder.
-      db.prepare("UPDATE scans SET items_count = ?, bytes_count = ? WHERE account_id = ?").run(
-        itemsCount,
-        bytesCount,
-        accountId,
-      );
-    }
-
-    // Success: commit this generation and prune older ones.
-    db.prepare(
-      `UPDATE scans SET status = 'complete', committed_gen = ?, scanning_gen = NULL,
-         items_count = ?, bytes_count = ?, finished_at = datetime('now') WHERE account_id = ?`,
-    ).run(gen, itemsCount, bytesCount, accountId);
-    db.prepare("DELETE FROM items WHERE account_id = ? AND gen != ?").run(accountId, gen);
-  } catch (err) {
-    // Commit what we gathered as a browsable partial snapshot, and prune others.
-    const cancelledByUser = err instanceof ScanCancelled;
-    const message = cancelledByUser
-      ? "Scan cancelled — showing what was scanned so far."
-      : err instanceof Error
-        ? err.message
-        : "Scan failed.";
-    db.prepare(
-      `UPDATE scans SET status = 'partial', committed_gen = ?, scanning_gen = NULL, error = ?,
-         items_count = ?, bytes_count = ?, finished_at = datetime('now') WHERE account_id = ?`,
-    ).run(gen, message, itemsCount, bytesCount, accountId);
-    db.prepare("DELETE FROM items WHERE account_id = ? AND gen != ?").run(accountId, gen);
-  } finally {
-    cancelled.delete(accountId);
+  const children: DriveItem[] = [];
+  let url: string | null =
+    `/me/drive/items/${targetId}/children?$top=200&$select=id,name,size,folder,file,package,parentReference,createdDateTime,lastModifiedDateTime`;
+  let absolute = false;
+  while (url) {
+    const page: ChildrenPage = await graphJson<ChildrenPage>(accountId, url, { absolute });
+    children.push(...(page.value ?? []));
+    const next: string | undefined = page["@odata.nextLink"];
+    url = next ?? null;
+    absolute = !!next;
   }
+
+  const stmt = upsertChild();
+  const write = db.transaction(() => {
+    // Drop direct children that no longer exist, then upsert the fresh set.
+    db.prepare("DELETE FROM items WHERE account_id = ? AND parent_id = ?").run(accountId, targetId);
+    for (const it of children) {
+      const folder = isFolderItem(it);
+      stmt.run({
+        account_id: accountId,
+        item_id: it.id,
+        parent_id: targetId,
+        name: it.name ?? "(unnamed)",
+        is_folder: folder ? 1 : 0,
+        size: it.size ?? 0,
+        child_count: it.folder?.childCount ?? 0,
+        mime_type: folder ? null : (it.file?.mimeType ?? null),
+        created: it.createdDateTime ?? null,
+        modified: it.lastModifiedDateTime ?? null,
+      });
+    }
+    db.prepare(
+      "UPDATE items SET children_fetched = 1, fetched_at = datetime('now') WHERE account_id = ? AND item_id = ?",
+    ).run(accountId, targetId);
+  });
+  write();
+  return targetId;
 }
+
+/** When a folder's children were last loaded (for the "loaded Xm ago" hint). */
+export function getFolderFetchedAt(accountId: string, folderId: string): string | null {
+  const row = db
+    .prepare("SELECT fetched_at FROM items WHERE account_id = ? AND item_id = ?")
+    .get(accountId, folderId) as { fetched_at: string | null } | undefined;
+  return row?.fetched_at ?? null;
+}
+
+// ─── Optional full scan (for account-wide analysis) ──────────────────────────
+
+const runningFull = new Set<string>();
+const cancelledFull = new Set<string>();
 
 class ScanCancelled extends Error {
   constructor() {
     super("Scan cancelled.");
     this.name = "ScanCancelled";
+  }
+}
+
+export interface FullScanState {
+  status: "none" | "scanning" | "complete" | "partial" | "error";
+  items: number;
+  finishedAt: string | null;
+  error: string | null;
+  isRunning: boolean;
+}
+
+export function getFullScanState(accountId: string): FullScanState {
+  const row = db
+    .prepare("SELECT full_status, full_items, full_finished_at, full_error FROM scans WHERE account_id = ?")
+    .get(accountId) as
+    | { full_status: FullScanState["status"]; full_items: number; full_finished_at: string | null; full_error: string | null }
+    | undefined;
+  return {
+    status: row?.full_status ?? "none",
+    items: row?.full_items ?? 0,
+    finishedAt: row?.full_finished_at ?? null,
+    error: row?.full_error ?? null,
+    isRunning: runningFull.has(accountId),
+  };
+}
+
+export function cancelFullScan(accountId: string): boolean {
+  if (!runningFull.has(accountId)) return false;
+  cancelledFull.add(accountId);
+  return true;
+}
+
+export function startFullScan(accountId: string): void {
+  if (runningFull.has(accountId)) return;
+  runningFull.add(accountId);
+  void runFullScan(accountId).finally(() => {
+    runningFull.delete(accountId);
+    cancelledFull.delete(accountId);
+  });
+}
+
+async function runFullScan(accountId: string): Promise<void> {
+  db.prepare(
+    `INSERT INTO scans (account_id, full_status, full_items, full_finished_at, full_error)
+     VALUES (?, 'scanning', 0, NULL, NULL)
+     ON CONFLICT(account_id) DO UPDATE SET full_status='scanning', full_items=0, full_finished_at=NULL, full_error=NULL`,
+  ).run(accountId);
+
+  let count = 0;
+  try {
+    const rootId = await getRootId(accountId);
+    const queue: string[] = [rootId];
+    while (queue.length > 0) {
+      if (cancelledFull.has(accountId)) throw new ScanCancelled();
+      const folderId = queue.shift()!;
+      await ensureChildren(accountId, folderId, { force: true });
+      const subfolders = db
+        .prepare("SELECT item_id FROM items WHERE account_id = ? AND parent_id = ? AND is_folder = 1")
+        .all(accountId, folderId) as { item_id: string }[];
+      for (const s of subfolders) queue.push(s.item_id);
+      count = (db.prepare("SELECT COUNT(*) n FROM items WHERE account_id = ?").get(accountId) as { n: number }).n;
+      db.prepare("UPDATE scans SET full_items = ? WHERE account_id = ?").run(count, accountId);
+    }
+    db.prepare(
+      "UPDATE scans SET full_status='complete', full_items=?, full_finished_at=datetime('now') WHERE account_id=?",
+    ).run(count, accountId);
+  } catch (err) {
+    const cancelled = err instanceof ScanCancelled;
+    db.prepare(
+      "UPDATE scans SET full_status=?, full_error=?, full_finished_at=datetime('now') WHERE account_id=?",
+    ).run(cancelled ? "partial" : "error", cancelled ? "Cancelled — analysis covers folders scanned so far." : (err instanceof Error ? err.message : "Scan failed."), accountId);
   }
 }

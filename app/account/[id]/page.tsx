@@ -1,10 +1,15 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ChevronRight, HardDrive } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { getAccount, listAccounts, type Accent } from "@/lib/accounts";
 import { getDriveQuota } from "@/lib/graph/drive";
 import { ReconnectNeededError } from "@/lib/graph/client";
-import { getScanState } from "@/lib/graph/scan";
+import {
+  ensureChildren,
+  getRootId,
+  getFolderFetchedAt,
+  getFullScanState,
+} from "@/lib/graph/scan";
 import {
   listChildren,
   breadcrumbs,
@@ -18,7 +23,8 @@ import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { AppBar } from "@/components/app-bar";
 import { AnalysisNav, type ExplorerView } from "@/components/explorer/analysis-nav";
-import { ScanControl } from "@/components/explorer/scan-control";
+import { FullScanControl } from "@/components/explorer/full-scan-control";
+import { FolderRefresh } from "@/components/explorer/folder-refresh";
 import { SizeBarRow } from "@/components/explorer/size-bar-row";
 import type { MoveTarget } from "@/components/explorer/move-menu";
 import { buttonVariants } from "@/components/ui/button";
@@ -39,7 +45,6 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
   const account = getAccount(id);
   if (!account) notFound();
 
-  // Other connected accounts are the possible move targets.
   const moveTargets: MoveTarget[] = listAccounts()
     .filter((a) => a.id !== id)
     .map((a) => ({ id: a.id, label: a.label }));
@@ -50,7 +55,7 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
       : "browse";
   const folderParam = typeof sp.folder === "string" ? sp.folder : null;
 
-  // Quota for the header (reconnect-aware).
+  // Header quota (reconnect-aware).
   let used: number | null = null;
   let total: number | null = null;
   let needsReconnect = account.status === "reconnect";
@@ -64,14 +69,24 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
     }
   }
 
-  const scan = getScanState(id);
-  const neverScanned = scan.readGen == null && !scan.isRunning;
+  // Lazily load the current level for browse (surface first, deeper on open).
+  let loadError: string | null = null;
+  if (!needsReconnect && view === "browse") {
+    try {
+      await getRootId(id);
+      await ensureChildren(id, folderParam);
+    } catch (err) {
+      if (err instanceof ReconnectNeededError) needsReconnect = true;
+      else loadError = err instanceof Error ? err.message : "Couldn't load this folder.";
+    }
+  }
+
+  const fullScan = getFullScanState(id);
 
   return (
     <>
       <AppBar connectHref="/api/auth/login" canAdd={false} />
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-5 p-6">
-        {/* Identity header strip */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <span className={cn("size-3 rounded-full", ACCENT_DOT[account.accent])} aria-hidden />
@@ -85,13 +100,11 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
               </p>
             </div>
           </div>
-          {!needsReconnect && <ScanControl accountId={id} initial={scan} />}
+          {!needsReconnect && <FullScanControl accountId={id} initial={fullScan} />}
         </div>
 
         {needsReconnect ? (
           <ReconnectPanel accountId={id} />
-        ) : neverScanned ? (
-          <NotScannedPanel accountId={id} initial={scan} />
         ) : (
           <>
             <AnalysisNav accountId={id} active={view} />
@@ -102,9 +115,10 @@ export default async function ExplorerPage({ params, searchParams }: PageProps<"
                 accountUsed={used ?? 0}
                 label={account.label}
                 moveTargets={moveTargets}
+                loadError={loadError}
               />
             ) : (
-              <AnalysisView accountId={id} view={view} moveTargets={moveTargets} />
+              <AnalysisView accountId={id} view={view} moveTargets={moveTargets} fullStatus={fullScan.status} />
             )}
           </>
         )}
@@ -123,45 +137,54 @@ function BrowseView({
   accountUsed,
   label,
   moveTargets,
+  loadError,
 }: {
   accountId: string;
   folderId: string | null;
   accountUsed: number;
   label: string;
   moveTargets: MoveTarget[];
+  loadError: string | null;
 }) {
   const items = listChildren(accountId, folderId, "size");
   const crumbs = folderId ? breadcrumbs(accountId, folderId) : [];
   const currentFolder = folderId ? getItem(accountId, folderId) : null;
   const parentSize = currentFolder?.size ?? accountUsed;
   const maxSize = items.reduce((m, it) => Math.max(m, it.size), 0);
+  const fetchedAt = getFolderFetchedAt(accountId, folderId ?? "");
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Breadcrumbs */}
-      <nav className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
-        <Link href="/" className="hover:text-foreground">← All accounts</Link>
-        <ChevronRight className="size-3.5" aria-hidden />
-        <Link
-          href={`/account/${accountId}?view=browse`}
-          className={cn("hover:text-foreground", !folderId && "font-medium text-foreground")}
-        >
-          {label}
-        </Link>
-        {crumbs.map((c, i) => (
-          <span key={c.id} className="flex items-center gap-1">
-            <ChevronRight className="size-3.5" aria-hidden />
-            <Link
-              href={`/account/${accountId}?view=browse&folder=${c.id}`}
-              className={cn("hover:text-foreground", i === crumbs.length - 1 && "font-medium text-foreground")}
-            >
-              {c.name}
-            </Link>
-          </span>
-        ))}
-      </nav>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <nav className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
+          <Link href="/" className="hover:text-foreground">← All accounts</Link>
+          <ChevronRight className="size-3.5" aria-hidden />
+          <Link
+            href={`/account/${accountId}?view=browse`}
+            className={cn("hover:text-foreground", !folderId && "font-medium text-foreground")}
+          >
+            {label}
+          </Link>
+          {crumbs.map((c, i) => (
+            <span key={c.id} className="flex items-center gap-1">
+              <ChevronRight className="size-3.5" aria-hidden />
+              <Link
+                href={`/account/${accountId}?view=browse&folder=${c.id}`}
+                className={cn("hover:text-foreground", i === crumbs.length - 1 && "font-medium text-foreground")}
+              >
+                {c.name}
+              </Link>
+            </span>
+          ))}
+        </nav>
+        <FolderRefresh accountId={accountId} folderId={folderId} fetchedAt={fetchedAt} />
+      </div>
 
-      {items.length === 0 ? (
+      {loadError ? (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+          {loadError}
+        </div>
+      ) : items.length === 0 ? (
         <EmptyFolder />
       ) : (
         <RowList>
@@ -185,29 +208,35 @@ function AnalysisView({
   accountId,
   view,
   moveTargets,
+  fullStatus,
 }: {
   accountId: string;
   view: ExplorerView;
   moveTargets: MoveTarget[];
+  fullStatus: string;
 }) {
   const items: Item[] =
     view === "files" ? biggestFiles(accountId) : view === "folders" ? biggestFolders(accountId) : staleFiles(accountId);
   const maxSize = items.reduce((m, it) => Math.max(m, it.size), 0);
 
-  // Resolve each row's parent-folder name for the path column.
   const pathFor = (it: Item): string => {
     if (!it.parentId) return "";
-    const parent = getItem(accountId, it.parentId);
-    return parent?.name ?? "";
+    return getItem(accountId, it.parentId)?.name ?? "";
   };
 
   return (
     <div className="flex flex-col gap-3">
+      {fullStatus !== "complete" && (
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          Based on the folders you&apos;ve opened so far. For complete account-wide results, run a{" "}
+          <strong>Full scan</strong> (top right).
+        </p>
+      )}
       {view === "stale" && (
         <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           We can&apos;t see when a file was last <em>opened</em> — Microsoft doesn&apos;t provide that for
           personal accounts. &quot;Stale&quot; means not <em>modified</em> in a long time, ranked by a
-          cleanup score (size × age) — big, long-untouched files first.
+          cleanup score (size × age).
         </p>
       )}
       {items.length === 0 ? (
@@ -238,29 +267,11 @@ function EmptyFolder() {
   );
 }
 
-function NotScannedPanel({ accountId, initial }: { accountId: string; initial: ReturnType<typeof getScanState> }) {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4 rounded-xl border border-dashed p-12 text-center">
-      <div className="flex size-12 items-center justify-center rounded-full border bg-muted/40">
-        <HardDrive className="size-6 text-muted-foreground" aria-hidden />
-      </div>
-      <div className="space-y-1">
-        <h2 className="text-base font-semibold">Not scanned yet</h2>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          Scan this drive to see its folder structure by size and surface the biggest and
-          longest-untouched items. Large drives stream in progressively.
-        </p>
-      </div>
-      <ScanControl accountId={accountId} initial={initial} />
-    </div>
-  );
-}
-
 function ReconnectPanel({ accountId }: { accountId: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-12 text-center">
       <p className="text-sm text-amber-600 dark:text-amber-500">
-        Access to this account expired. Reconnect to scan and browse it again.
+        Access to this account expired. Reconnect to browse it again.
       </p>
       <a
         href={`/api/auth/login?reconnect=${accountId}`}

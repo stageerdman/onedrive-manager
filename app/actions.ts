@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { updateLabelDescription, disconnectAccount } from "@/lib/accounts";
 import { db } from "@/lib/db";
 import { clearTokenCache } from "@/lib/graph/client";
+import { ensureChildren } from "@/lib/graph/scan";
 
 /**
  * Inline-edit save for an account's user-authored label / description.
@@ -44,10 +45,16 @@ export async function disconnectAccountAction(accountId: string): Promise<void> 
   revalidatePath("/settings");
 }
 
-/** Clear an account's cached scan snapshot (safe — it's only a cache). */
+/** Clear an account's cached snapshot (safe — it's only a cache; refills as you browse). */
 export async function clearScanCacheAction(accountId: string): Promise<void> {
   db.prepare("DELETE FROM items WHERE account_id = ?").run(accountId);
   db.prepare("DELETE FROM scans WHERE account_id = ?").run(accountId);
   revalidatePath(`/account/${accountId}`);
   revalidatePath("/settings");
+}
+
+/** Re-fetch one folder's children from Graph (the per-folder "refresh"). */
+export async function refreshFolderAction(accountId: string, folderId: string | null): Promise<void> {
+  await ensureChildren(accountId, folderId, { force: true });
+  revalidatePath(`/account/${accountId}`);
 }

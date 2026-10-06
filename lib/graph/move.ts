@@ -130,7 +130,7 @@ async function runMove(
       sourceAccount,
       `/me/drive/items/${itemId}?$select=id,name,size,folder,file`,
     );
-    const isFolder = !!item.folder;
+    const isFolder = !item.file; // file iff `file` facet; else a container (incl. Personal Vault / packages)
     db.prepare(
       "UPDATE moves SET item_name = ?, is_folder = ?, bytes_total = ? WHERE id = ?",
     ).run(item.name ?? null, isFolder ? 1 : 0, item.size ?? 0, id);
@@ -190,7 +190,7 @@ async function copyInto(
   throwIfCancelled(moveId);
   const name = item.name ?? "(unnamed)";
 
-  if (item.folder) {
+  if (!item.file) {
     const created = await graphJson<DriveItem>(targetAccount, `/me/drive/items/${targetParentId}/children`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

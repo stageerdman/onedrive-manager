@@ -40,41 +40,48 @@ function migrate(db: Database.Database): void {
       connected_at   TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
     );
+  `);
 
-    -- One scan record per account. 'generation' lets a re-scan fill a new snapshot
-    -- while the explorer keeps reading the committed one, then swap atomically.
+  // One-time migration from the old generation-based full-scan cache to the lazy,
+  // per-folder model. The items/scans tables are pure cache (rebuilt by browsing),
+  // so dropping them loses nothing but a snapshot.
+  const itemCols = db.prepare("PRAGMA table_info(items)").all() as { name: string }[];
+  if (itemCols.some((c) => c.name === "gen")) {
+    db.exec("DROP TABLE IF EXISTS items; DROP TABLE IF EXISTS scans;");
+  }
+
+  db.exec(`
+    -- Per-account drive metadata (root id + optional full-scan status for analysis).
     CREATE TABLE IF NOT EXISTS scans (
       account_id    TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
       root_id       TEXT,
-      committed_gen INTEGER,                      -- generation the explorer reads
-      scanning_gen  INTEGER,                      -- generation being filled right now
-      status        TEXT NOT NULL DEFAULT 'idle', -- idle|scanning|complete|partial|error
-      items_count   INTEGER NOT NULL DEFAULT 0,
-      bytes_count   INTEGER NOT NULL DEFAULT 0,
-      started_at    TEXT,
-      finished_at   TEXT,
-      error         TEXT
+      full_status   TEXT NOT NULL DEFAULT 'none', -- none|scanning|complete|partial|error
+      full_items    INTEGER NOT NULL DEFAULT 0,
+      full_finished_at TEXT,
+      full_error    TEXT
     );
 
-    -- Cached snapshot of drive items. OneDrive folder 'size' is already the
-    -- recursive rollup of its contents, so size is stored directly.
+    -- Lazily-cached drive items. Each folder's direct children are fetched on open
+    -- (children_fetched flags that). OneDrive folder 'size' is already the recursive
+    -- rollup, so per-folder size is correct even without a full crawl.
     CREATE TABLE IF NOT EXISTS items (
-      account_id  TEXT NOT NULL,
-      gen         INTEGER NOT NULL,
-      item_id     TEXT NOT NULL,
-      parent_id   TEXT,
-      name        TEXT NOT NULL,
-      is_folder   INTEGER NOT NULL DEFAULT 0,
-      size        INTEGER NOT NULL DEFAULT 0,
-      child_count INTEGER NOT NULL DEFAULT 0,
-      mime_type   TEXT,
-      created     TEXT,
-      modified    TEXT,
-      PRIMARY KEY (account_id, gen, item_id)
+      account_id       TEXT NOT NULL,
+      item_id          TEXT NOT NULL,
+      parent_id        TEXT,
+      name             TEXT NOT NULL,
+      is_folder        INTEGER NOT NULL DEFAULT 0,
+      size             INTEGER NOT NULL DEFAULT 0,
+      child_count      INTEGER NOT NULL DEFAULT 0,
+      mime_type        TEXT,
+      created          TEXT,
+      modified         TEXT,
+      children_fetched INTEGER NOT NULL DEFAULT 0,  -- have this folder's children been loaded?
+      fetched_at       TEXT,                         -- when this folder was last loaded
+      PRIMARY KEY (account_id, item_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_items_children ON items (account_id, gen, parent_id);
-    CREATE INDEX IF NOT EXISTS idx_items_folder_size ON items (account_id, gen, is_folder, size);
-    CREATE INDEX IF NOT EXISTS idx_items_modified ON items (account_id, gen, modified);
+    CREATE INDEX IF NOT EXISTS idx_items_children ON items (account_id, parent_id);
+    CREATE INDEX IF NOT EXISTS idx_items_folder_size ON items (account_id, is_folder, size);
+    CREATE INDEX IF NOT EXISTS idx_items_modified ON items (account_id, modified);
 
     -- Cross-account move jobs. Safe-by-design: copy whole subtree → verify → then
     -- delete the source. Progress is tracked so the UI can show it and resume context.
