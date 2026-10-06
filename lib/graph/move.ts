@@ -158,6 +158,31 @@ export function resumeMove(id: string): boolean {
   return true;
 }
 
+/**
+ * Relaunch moves that were mid-flight when the process stopped.
+ *
+ * A move runs in-memory, so a restart (crash, reboot, redeploy) leaves its row in an
+ * active status — `copying` / `verifying` / `deleting` — with nothing driving it. On
+ * boot we pick those up and continue automatically; the move is idempotent, so it just
+ * carries on with the files not yet copied. This is what makes an always-on host truly
+ * hands-off: you start a move, close the laptop, and it finishes server-side with no
+ * Resume click — even across a server restart.
+ *
+ * `paused` moves are deliberately skipped: a move only parks there after 25× auto-retry
+ * failed, which means something is actually wrong — that one still waits for a human.
+ */
+export function resumeInterruptedMoves(): number {
+  const rows = db
+    .prepare("SELECT id FROM moves WHERE status IN ('copying', 'verifying', 'deleting')")
+    .all() as { id: string }[];
+  let resumed = 0;
+  for (const { id } of rows) {
+    if (resumeMove(id)) resumed++;
+  }
+  if (resumed > 0) console.log(`[move] resumed ${resumed} interrupted move(s) on startup`);
+  return resumed;
+}
+
 function launch(id: string, input: { sourceAccount: string; targetAccount: string; itemId: string }): void {
   running.add(id);
   void runMove(id, input).finally(() => {
