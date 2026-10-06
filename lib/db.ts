@@ -40,6 +40,41 @@ function migrate(db: Database.Database): void {
       connected_at   TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- One scan record per account. 'generation' lets a re-scan fill a new snapshot
+    -- while the explorer keeps reading the committed one, then swap atomically.
+    CREATE TABLE IF NOT EXISTS scans (
+      account_id    TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+      root_id       TEXT,
+      committed_gen INTEGER,                      -- generation the explorer reads
+      scanning_gen  INTEGER,                      -- generation being filled right now
+      status        TEXT NOT NULL DEFAULT 'idle', -- idle|scanning|complete|partial|error
+      items_count   INTEGER NOT NULL DEFAULT 0,
+      bytes_count   INTEGER NOT NULL DEFAULT 0,
+      started_at    TEXT,
+      finished_at   TEXT,
+      error         TEXT
+    );
+
+    -- Cached snapshot of drive items. OneDrive folder 'size' is already the
+    -- recursive rollup of its contents, so size is stored directly.
+    CREATE TABLE IF NOT EXISTS items (
+      account_id  TEXT NOT NULL,
+      gen         INTEGER NOT NULL,
+      item_id     TEXT NOT NULL,
+      parent_id   TEXT,
+      name        TEXT NOT NULL,
+      is_folder   INTEGER NOT NULL DEFAULT 0,
+      size        INTEGER NOT NULL DEFAULT 0,
+      child_count INTEGER NOT NULL DEFAULT 0,
+      mime_type   TEXT,
+      created     TEXT,
+      modified    TEXT,
+      PRIMARY KEY (account_id, gen, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_items_children ON items (account_id, gen, parent_id);
+    CREATE INDEX IF NOT EXISTS idx_items_folder_size ON items (account_id, gen, is_folder, size);
+    CREATE INDEX IF NOT EXISTS idx_items_modified ON items (account_id, gen, modified);
   `);
 }
 
