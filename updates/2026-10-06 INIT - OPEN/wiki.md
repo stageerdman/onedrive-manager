@@ -43,6 +43,18 @@ learned and decided, and why.
   app's own session cookie is signed with `AUTH_SECRET`. `.env` is never committed.
 - Repo is **private** — it's a personal tool wired to the owner's own storage.
 
+## Cross-account move: no server-to-server for personal accounts (verified)
+- Microsoft Graph has **no supported way to copy/move between two separate personal
+  Microsoft accounts** server-side. The `copy` action needs both drives under one token;
+  **upload-from-URL** (`@microsoft.graph.sourceUrl`) is **rejected for consumer OneDrive**:
+  tested 2026-10-06 → `400 invalidRequest: "The sourceUrl provided is not supported"`.
+- Therefore a cross-account move **must stream bytes through this machine** (download from
+  source → upload to target). It's bandwidth-bound; large folders take real time. The
+  engine detects upload-from-URL is unsupported once per move and then streams directly,
+  with within-file progress, auto-retry/resume, and verify-before-delete.
+- Implication for a future "no computer needed" version: would require both accounts in one
+  org tenant (not the case here) or a cloud worker doing the streaming instead of the laptop.
+
 ## Open decisions (also tracked in issues.txt)
 - **Persistence store.** Leaning local **SQLite** (`better-sqlite3`) for a personal,
   single-user app: refresh tokens, user-authored usernames/descriptions, and scan caches.

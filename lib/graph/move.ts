@@ -25,6 +25,7 @@ const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
 
 const running = new Set<string>();
 const cancelled = new Set<string>();
+const serverSideCap = new Map<string, boolean>(); // moveId -> does upload-from-URL work?
 
 class MoveCancelled extends Error {
   constructor() {
@@ -162,6 +163,7 @@ function launch(id: string, input: { sourceAccount: string; targetAccount: strin
   void runMove(id, input).finally(() => {
     running.delete(id);
     cancelled.delete(id);
+    serverSideCap.delete(id);
   });
 }
 
@@ -412,16 +414,25 @@ async function copyFile(
   const encoded = encodeURIComponent(name);
   const downloadUrl = await getDownloadUrl(sourceAccount, item.id, name);
 
-  // Prefer server-to-server upload-from-URL (retried a couple of times).
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Try server-to-server (upload-from-URL) ONCE per move. Many personal accounts
+  // reject it ("sourceUrl not supported"); once we learn that, skip it for the rest
+  // of the move and stream directly instead of wasting an attempt on every file.
+  if (serverSideCap.get(moveId) !== false) {
     try {
-      return await uploadFromUrl(targetAccount, targetParentId, name, downloadUrl, size, moveId, progress);
-    } catch {
-      await sleep(2000);
+      const result = await uploadFromUrl(targetAccount, targetParentId, name, downloadUrl, size, moveId, progress);
+      if (serverSideCap.get(moveId) !== true) {
+        serverSideCap.set(moveId, true);
+        console.log(`[move] server-to-server works for this move`);
+      }
+      return result;
+    } catch (e) {
+      serverSideCap.set(moveId, false);
+      console.log(`[move] server-to-server unavailable (${e instanceof Error ? e.message : e}) — streaming through this machine from here on`);
     }
   }
 
-  // Fallback: route bytes through here (resiliently).
+  // Stream through this machine (download from source → upload to target).
+  const onProgress = (uploaded: number) => setProgress(moveId, progress.files, progress.bytes + uploaded);
   if (size <= SIMPLE_UPLOAD_MAX) {
     const src = await resilientFetch(downloadUrl);
     if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
@@ -432,9 +443,10 @@ async function copyFile(
       { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf },
     );
     if (!res.ok) throw new Error(`Upload of "${name}" failed (${res.status}).`);
+    onProgress(size);
     return (await res.json()) as DriveItem;
   }
-  return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl);
+  return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl, onProgress);
 }
 
 async function uploadFromUrl(
@@ -502,6 +514,7 @@ async function streamLargeFile(
   name: string,
   size: number,
   downloadUrl: string,
+  onProgress?: (uploaded: number) => void,
 ): Promise<DriveItem> {
   const session = await graphJson<{ uploadUrl: string }>(
     targetAccount,
@@ -554,6 +567,7 @@ async function streamLargeFile(
       await put(Buffer.from(carry.subarray(0, CHUNK)), offset);
       offset += CHUNK;
       carry = carry.subarray(CHUNK);
+      onProgress?.(offset); // live within-file progress
     }
   }
   if (carry.length > 0 || offset < size) await put(carry, offset);
