@@ -171,7 +171,7 @@ async function copyInto(
 
   // File: copy content, then verify size.
   const size = item.size ?? 0;
-  const uploaded = await copyFile(sourceAccount, targetAccount, item, targetParentId);
+  const uploaded = await copyFile(sourceAccount, targetAccount, item, targetParentId, moveId, progress);
   if ((uploaded.size ?? -1) !== size) {
     throw new Error(`Verification failed for "${name}": size ${uploaded.size} ≠ ${size}. Source left intact.`);
   }
@@ -181,39 +181,133 @@ async function copyInto(
   setProgress(moveId, progress.files, progress.bytes);
 }
 
-/** Copy one file's content from source → target, returning the new DriveItem. */
+/**
+ * The pre-authenticated, short-lived content download URL for a source file.
+ * Read from the 302 `Location` of `/content` — reliable, unlike `$select`ing the
+ * `@microsoft.graph.downloadUrl` annotation (which Microsoft silently drops).
+ */
+async function getDownloadUrl(account: string, itemId: string, name: string): Promise<string> {
+  const res = await graphFetch(account, `/me/drive/items/${itemId}/content`, { redirect: "manual" });
+  const location = res.headers.get("location");
+  if ((res.status === 302 || res.status === 301) && location) return location;
+  // Fallback: ask for the annotation on its own (no other $select fields).
+  const item = await graphJson<DriveItem>(
+    account,
+    `/me/drive/items/${itemId}?$select=@microsoft.graph.downloadUrl`,
+  );
+  const url = item["@microsoft.graph.downloadUrl"];
+  if (!url) throw new Error(`No download URL for "${name}" (status ${res.status}).`);
+  return url;
+}
+
+/**
+ * Copy one file's content from source → target.
+ *
+ * Preferred path: **upload from URL** — hand the target drive the source's
+ * download URL and Microsoft copies the bytes server-to-server (nothing routes
+ * through this machine), tracked via an async monitor. Falls back to streaming
+ * through here if the target rejects upload-from-URL.
+ */
 async function copyFile(
   sourceAccount: string,
   targetAccount: string,
   item: DriveItem,
   targetParentId: string,
+  moveId: string,
+  progress: { files: number; bytes: number },
 ): Promise<DriveItem> {
   const name = item.name ?? "(unnamed)";
   const size = item.size ?? 0;
   const encoded = encodeURIComponent(name);
+  const downloadUrl = await getDownloadUrl(sourceAccount, item.id, name);
 
-  // Pre-authenticated, short-lived download URL for the source content.
-  const withUrl = await graphJson<DriveItem>(
-    sourceAccount,
-    `/me/drive/items/${item.id}?$select=id,name,size,@microsoft.graph.downloadUrl`,
-  );
-  const downloadUrl = withUrl["@microsoft.graph.downloadUrl"];
-  if (!downloadUrl) throw new Error(`No download URL for "${name}".`);
+  try {
+    return await uploadFromUrl(targetAccount, targetParentId, name, downloadUrl, size, moveId, progress);
+  } catch {
+    // Fall back to routing the bytes through here.
+    if (size <= SIMPLE_UPLOAD_MAX) {
+      const src = await fetch(downloadUrl);
+      if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
+      const buf = new Uint8Array(await src.arrayBuffer());
+      const res = await graphFetch(
+        targetAccount,
+        `/me/drive/items/${targetParentId}:/${encoded}:/content?@microsoft.graph.conflictBehavior=rename`,
+        { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf },
+      );
+      if (!res.ok) throw new Error(`Upload of "${name}" failed (${res.status}).`);
+      return (await res.json()) as DriveItem;
+    }
+    return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl);
+  }
+}
 
-  if (size <= SIMPLE_UPLOAD_MAX) {
-    const src = await fetch(downloadUrl);
-    if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
-    const buf = new Uint8Array(await src.arrayBuffer());
-    const res = await graphFetch(
-      targetAccount,
-      `/me/drive/items/${targetParentId}:/${encoded}:/content?@microsoft.graph.conflictBehavior=rename`,
-      { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf },
-    );
-    if (!res.ok) throw new Error(`Upload of "${name}" failed (${res.status}).`);
-    return (await res.json()) as DriveItem;
+/**
+ * Server-to-server copy: POST the target's children endpoint with
+ * `@microsoft.graph.sourceUrl` + `Prefer: respond-async`, then poll the returned
+ * monitor URL until the target finishes fetching. Updates per-file progress.
+ */
+async function uploadFromUrl(
+  targetAccount: string,
+  targetParentId: string,
+  name: string,
+  sourceUrl: string,
+  size: number,
+  moveId: string,
+  progress: { files: number; bytes: number },
+): Promise<DriveItem> {
+  const res = await graphFetch(targetAccount, `/me/drive/items/${targetParentId}/children`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Prefer: "respond-async" },
+    body: JSON.stringify({
+      name,
+      file: {},
+      "@microsoft.graph.sourceUrl": sourceUrl,
+      "@microsoft.graph.conflictBehavior": "rename",
+    }),
+  });
+
+  const monitorUrl = res.headers.get("location");
+  if (res.status !== 202 || !monitorUrl) {
+    throw new Error(`Upload-from-URL not accepted for "${name}" (${res.status}).`);
   }
 
-  return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl);
+  // Poll the async monitor. It stays 202 (JSON {status, percentageComplete}) while
+  // in progress, then signals completion either as status:"completed" with a
+  // resourceId or a 3xx redirect to the finished item. Cap generously for big files.
+  const started = Date.now();
+  const MAX_MS = 6 * 60 * 60 * 1000; // 6h
+  while (Date.now() - started < MAX_MS) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const mon = await fetch(monitorUrl, { redirect: "manual", headers: { Accept: "application/json" } });
+
+    // Completed via redirect to the new item.
+    if (mon.status >= 300 && mon.status < 400) {
+      const loc = mon.headers.get("location");
+      if (!loc) throw new Error(`Monitor for "${name}" redirected without a location.`);
+      return graphJson<DriveItem>(targetAccount, `${loc}?$select=id,name,size`, { absolute: true });
+    }
+
+    if (mon.status === 200 || mon.status === 202) {
+      const body = await mon.json().catch(() => null);
+      // Some monitors return the finished DriveItem directly.
+      if (body?.id && body?.size !== undefined) {
+        return { id: body.id, name: body.name, size: body.size };
+      }
+      const status: string | undefined = body?.status;
+      const pct = Number(body?.percentageComplete ?? 0);
+      setProgress(moveId, progress.files, progress.bytes + Math.floor((size * pct) / 100));
+
+      if (status === "completed" && body?.resourceId) {
+        const resourceId = String(body.resourceId).replace(/^driveItem_/, "");
+        return graphJson<DriveItem>(targetAccount, `/me/drive/items/${resourceId}?$select=id,name,size`);
+      }
+      if (status === "failed") throw new Error(`Target failed to fetch "${name}".`);
+      // otherwise still in progress → keep polling
+    } else {
+      throw new Error(`Monitor for "${name}" returned ${mon.status}.`);
+    }
+  }
+  throw new Error(`Upload-from-URL for "${name}" timed out.`);
 }
 
 /** Large file: create an upload session and stream aligned chunks into it. */
