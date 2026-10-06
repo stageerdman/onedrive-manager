@@ -51,10 +51,14 @@ learned and decided, and why.
   Re-tested with a `createLink` anonymous sharing link (1drv.ms webUrl) and with
   `?download=1` — both also 400. The feature is not enabled for these accounts in any
   URL form; don't re-attempt.
-- **Untried theoretical avenue** (server-side, if ever needed): share the item from A to
-  B, then have B call the Graph `copy` action on the *shared* driveItem into B's own
-  drive — the copy may then run inside Microsoft's cloud. Unverified, complex (sharing +
-  permissions), parked.
+- **Share-then-copy: TESTED, does not work (2026-10-06).** A invites B (read) → 200; B can
+  directly read the item in A's drive (`GET /drives/{Adrive}/items/{id}` → 200). But the
+  copy into B's drive (`POST /drives/{Adrive}/items/{id}/copy` with parentReference=B's
+  drive) returns **`401 unauthenticated`** — the copy engine can't cross the two accounts'
+  security boundary. So cross-account *read* via sharing works, but *copy* does not.
+- **Final verdict:** there is NO server-side copy/move between two separate personal
+  Microsoft accounts. Streaming the bytes through the app host (Method 1, resumable upload
+  session) is the only option. Don't revisit unless the accounts move into one org tenant.
 - Therefore a cross-account move **must stream bytes through this machine** (download from
   source → upload to target). It's bandwidth-bound; large folders take real time. The
   engine detects upload-from-URL is unsupported once per move and then streams directly,
