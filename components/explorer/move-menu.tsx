@@ -47,13 +47,14 @@ export function MoveMenu({
 
   // Poll an in-flight move.
   useEffect(() => {
-    if (!move || move.status === "complete" || move.status === "error" || move.status === "cancelled") return;
+    const terminal = (s: string) => ["complete", "error", "cancelled", "paused"].includes(s);
+    if (!move || terminal(move.status)) return;
     const timer = setInterval(async () => {
       try {
         const res = await fetch(`/api/moves/${move.id}`, { cache: "no-store" });
         const next: MoveState = await res.json();
         setMove(next);
-        if (next.status === "complete" || next.status === "error" || next.status === "cancelled") {
+        if (terminal(next.status)) {
           clearInterval(timer);
           if (next.status === "complete") router.refresh();
         }
@@ -101,6 +102,9 @@ export function MoveMenu({
     }
     if (move.status === "cancelled") {
       return <span className="text-xs text-muted-foreground">Cancelled</span>;
+    }
+    if (move.status === "paused") {
+      return <span className="text-xs text-amber-600 dark:text-amber-500">Paused — resume in the tracker ↓</span>;
     }
     const label =
       move.status === "deleting" ? "Removing original…" : move.status === "verifying" ? "Verifying…" : "Copying…";
