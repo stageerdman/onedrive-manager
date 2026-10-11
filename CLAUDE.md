@@ -101,12 +101,14 @@ Created under AI Control 2026-10-06. INIT roadmap + handoff in `updates/`.
 meters, inline label/description), **lazy** explorer + analysis, settings, and
 **cross-account move** (streams through the host — no server-side path exists for separate
 personal accounts; resumable + auto-retry + cancellable + live tracker). Runs as `next dev`
-on 127.0.0.1. **Next: deploy to an always-on cloud host so moves finish with the computer
-off** — Electron was ruled out for not solving the computer-off case. Host is a
-**DigitalOcean trial-credit Droplet** ($0 out of pocket for a bounded rebalance; Oracle
-Always Free stayed blocked at signup). Step-by-step guide in
-`updates/2026-10-06 CLOUD-DEPLOY - OPEN/digitalocean-deploy.md`. See `issues.txt` and the
-INIT update's "Where we are / Next step" for the full handoff.
+on 127.0.0.1. **Next: run unattended moves so they finish with the laptop closed.** The
+app side is done (auto-resume on boot); only the *where-does-it-run* host is open. As of
+2026-10-11 the **free-cloud path is exhausted** — Oracle is an unresolvable signup dead
+end, GCP always-free has 1 GB egress, Chinese/Russian clouds are trial-credit and/or
+hostile to Microsoft uploads (see CLOUD-DEPLOY `wiki.md` "round 3"). Direction pivoted to
+**$0 owned hardware** — recommended: run the move on the owner's **own laptop overnight**
+(lid closed, kept awake via Amphetamine/`caffeinate`). Decision pending with owner. See
+`issues.txt` and the CLOUD-DEPLOY update's "Where we are" for the full handoff.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

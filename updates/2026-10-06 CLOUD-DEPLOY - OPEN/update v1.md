@@ -64,14 +64,37 @@ always-on, real Linux VM + disk). See `oracle-cloud-deploy.md` for the step-by-s
   - ✅ **Host switched 2026-10-11:** going with a **DigitalOcean trial-credit Droplet**
     instead of waiting on Oracle (see wiki "round 2"). $0 out of pocket for a bounded
     rebalance, painless signup, x86 VM → existing steps apply. Guide:
-    `digitalocean-deploy.md`. Now provisioning.
+    `digitalocean-deploy.md`.
+  - ⚠️ **Reverted same day (2026-10-11) — cloud path exhausted (see wiki "round 3"):**
+    DO's credit is now **$25 not $200**, and — more importantly — the owner does **not** want
+    a trial-credit / paid-plan host at all (a Droplet is a paid plan, credit or not). **Oracle
+    is now a hard dead end** — support said they *cannot* resolve the signup failure, so the
+    free-forever fallback is gone too. Re-surveyed free-forever VMs incl. Chinese/Russian:
+    none fit a Microsoft-upload mover (GCP always-free = 1 GB egress; Chinese = trial + Great
+    Firewall; Russian = paid/serverless + MS geo-block risk).
+  - 🔀 **New direction — $0 via owned hardware (DECISION PENDING with owner):**
+    (1) **run the move on the owner's own laptop overnight** — lid closed, plugged in, sleep
+    disabled (Amphetamine/`caffeinate`); bounded job, app already runs locally, auto-resume
+    covers interruptions — **recommended, zero setup/cost**; (2) an old phone (Termux)/Pi/NAS
+    if one exists; (3) a trial credit (e.g. GCP $300/90d) only if owner relents. Asked the
+    owner to pick; **session paused before they answered — resume here.**
 
-## Where we are (handoff — 2026-10-06)
-The app-side work is **done and verified**: an interrupted move now self-resumes on
-process start, which is the one thing that was missing for a truly hands-off host. The
-deployment guide (`oracle-cloud-deploy.md`) is ready to follow.
+## Where we are (handoff — updated 2026-10-11)
+The app-side work has been **done and verified since 2026-10-06**: an interrupted move
+self-resumes on process start (`resumeInterruptedMoves()` in `lib/graph/move.ts`, wired via
+`instrumentation.ts`), so any host that stays up finishes a move with no clicks. **Nothing
+in the app is blocking** — this has been purely a *where-does-it-run* question.
 
-**Owner's turn:** provision the Oracle Always-Free VM and follow the guide. The only
-app-config change is `AZURE_REDIRECT_URI` → the box's HTTPS callback, registered in the
-Azure app registration (alongside the existing localhost one). Durable decisions and the
-bandwidth caveat are in `wiki.md`.
+That question is now settled negatively for the cloud: after three rounds of research
+(see `wiki.md`), **there is no genuinely-free-forever cloud box** that works for a
+Microsoft-upload mover in 2026 — Oracle is an unresolvable dead end, GCP always-free has
+1 GB egress, and Chinese/Russian options are trial-credit and/or hostile to Microsoft
+traffic. The owner does not want a trial-credit/paid host.
+
+**Resume point:** decide between the three **$0 owned-hardware paths** in the status note
+above. The strong default is **#1 — run the move on the owner's own laptop overnight**
+(lid closed, plugged in, Amphetamine/`caffeinate` to prevent sleep). No new host, no code
+change: just launch the app locally, start the move, keep the Mac awake, let it finish.
+The Oracle/DigitalOcean guides remain as reference — their commands apply to any Linux box
+(e.g. a Raspberry Pi or old laptop) if path #2 is chosen later. The owner was asked to pick
+and **paused the session before answering.**

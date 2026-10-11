@@ -122,6 +122,51 @@ Containers** = free egress ethos but paid-only ($5/mo Workers Paid) + not a pers
 rebalance — $0 out of pocket, real VM, reliable signup, deploy guide applies as-is. Keep Oracle
 hotspot-retry / Vultr 1-yr free tier as the fallback only if the app must truly run 24/7 forever.
 
+## Free-only re-search, round 3 (2026-10-11) — the cloud path is exhausted; pivot to owned hardware
+Two things collapsed the plan since round 2:
+- **DigitalOcean's credit is now $25, not $200** (owner saw this at signup; the $200 offer is
+  gone). *Note:* $25 would actually still cover this job — a $6 droplet includes **1 TB/mo
+  outbound free** (verified 2026, overage $0.01/GiB) and runs ~$0.009/hr, so a bounded rebalance
+  costs a few dollars of the $25 with free egress. But the owner does **not** want a trial-credit
+  / paid-plan path at all — a Droplet is a paid plan whose cost merely comes *out of* the credit,
+  and that's not "free" in the sense wanted.
+- **Oracle is now a hard dead end**, not "blocked pending support." Oracle support told the owner
+  directly they **cannot resolve** the signup failure. The round-1/2 hotspot/card fixes do not
+  apply — the account simply can't be created. Remove Oracle as an option.
+
+Re-surveyed genuinely-free-**forever** VMs at the owner's request (incl. Chinese + Russian):
+- **Oracle Always Free** — the only free-forever VM that fit (2 ARM core / 12 GB / 200 GB /
+  **10 TB egress**, halved from 4/24 in June 2026). **Dead — signup unresolvable.**
+- **Google Cloud always-free e2-micro** — free forever, but **1 GB egress/mo** → a single 64 GB
+  move goes straight into paid egress. Dead for a mover.
+- **Chinese clouds** — Alibaba ($450–1,300 / 12-mo) and Tencent (3-mo free CVM, no card) are
+  **trial credits, not forever**; Huawei is paid. And **all route through the Great Firewall**,
+  which throttles/breaks long uploads to Microsoft. Wrong tool for a OneDrive target.
+- **Russian clouds** — **no always-free VM** exists (Cloud.ru ~1,252₽/mo and Timeweb ~300₽/mo are
+  paid; Yandex free tier is serverless-only). Earlier "Cloud.ru always-free" claim was stale. Plus
+  routing personal MS OAuth tokens through a Russian host invites Microsoft geo-block/throttle.
+- Free PaaS (Render/Railway/Koyeb) still sleep + ephemeral; Fly.io free still dead; Cloudflare
+  still paid-only for persistent compute.
+
+**Round-3 conclusion:** there is **no genuinely-free-forever cloud box** that works for streaming
+tens of GB to OneDrive in 2026. Stop provider-hunting. The real $0 options use **hardware the
+owner already has**:
+1. **Run the move on the owner's own laptop overnight** — lid closed, plugged in, sleep disabled
+   (free: Amphetamine app, or `caffeinate`). The job is *bounded* (hours / a couple of nights,
+   not 24/7), the app already runs locally on 127.0.0.1, and the auto-resume hook covers any
+   interruption. "Computer off" becomes "computer on but closed and untouched for a few hours."
+   **This is the recommended path — zero new setup, zero cost.**
+2. **An old always-on device** — old Android phone (Node via Termux), Raspberry Pi, NAS, or a
+   spare laptop that can live in a drawer. Owner previously said no spare *PC*; a drawer phone /
+   Pi would still work and is worth confirming.
+3. **Trial credit after all** (owner has resisted) — e.g. GCP $300/90d pays even multi-TB egress
+   from the credit and auto-closes without charging the card. $0 out of pocket, not free-forever.
+
+**DECISION PENDING (owner):** which of the three $0 paths to set up. Asked 2026-10-11; owner
+paused the session before answering. Resume here. The Oracle and DigitalOcean deploy guides stay
+in this folder as reference (the commands apply to any Linux box, incl. a Pi / old laptop), but
+neither Oracle nor a paid Droplet is the chosen host anymore.
+
 ## Bandwidth reality
 Every byte of a move routes *through* the box: down from the source account, up to the
 target. A 64 GB move ≈ 128 GB of transfer. Oracle's Always-Free egress allowance (10
