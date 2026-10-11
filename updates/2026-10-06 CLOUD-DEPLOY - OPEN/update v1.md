@@ -54,12 +54,17 @@ always-on, real Linux VM + disk). See `oracle-cloud-deploy.md` for the step-by-s
 ## Status tracking
 - [x] Phase 1 — auto-resume-on-boot hook (code + instrumentation, verified on live move)
 - [x] Phase 2 — Oracle Cloud deployment guide written
+- [x] Phase 2 — DigitalOcean deploy guide written (`digitalocean-deploy.md`)
 - [ ] Phase 2 — owner provisions the box and runs the first unattended move (owner step)
   - ⏸ **Blocked 2026-10-07:** Oracle registration won't complete (can't register). Owner
     has opened a request with Oracle customer support and is **waiting on them** to unblock
     the account. Alternatives were evaluated (see wiki "Re-confirming the host") and Oracle
     remains the choice — no spare home hardware, and free-cloud alternatives fail on egress
     cost or the 12-month clock. No host switch; hold for Oracle support.
+  - ✅ **Host switched 2026-10-11:** going with a **DigitalOcean trial-credit Droplet**
+    instead of waiting on Oracle (see wiki "round 2"). $0 out of pocket for a bounded
+    rebalance, painless signup, x86 VM → existing steps apply. Guide:
+    `digitalocean-deploy.md`. Now provisioning.
 
 ## Where we are (handoff — 2026-10-06)
 The app-side work is **done and verified**: an interrupted move now self-resumes on

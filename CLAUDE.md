@@ -101,10 +101,12 @@ Created under AI Control 2026-10-06. INIT roadmap + handoff in `updates/`.
 meters, inline label/description), **lazy** explorer + analysis, settings, and
 **cross-account move** (streams through the host — no server-side path exists for separate
 personal accounts; resumable + auto-retry + cancellable + live tracker). Runs as `next dev`
-on 127.0.0.1. **Next: deploy to an always-on free cloud host (Oracle Cloud Always Free)** so
-moves finish with the computer off — Electron was ruled out for not solving the computer-off
-case. Step-by-step guide in `updates/2026-10-06 CLOUD-DEPLOY - OPEN/oracle-cloud-deploy.md`.
-See `issues.txt` and the INIT update's "Where we are / Next step" for the full handoff.
+on 127.0.0.1. **Next: deploy to an always-on cloud host so moves finish with the computer
+off** — Electron was ruled out for not solving the computer-off case. Host is a
+**DigitalOcean trial-credit Droplet** ($0 out of pocket for a bounded rebalance; Oracle
+Always Free stayed blocked at signup). Step-by-step guide in
+`updates/2026-10-06 CLOUD-DEPLOY - OPEN/digitalocean-deploy.md`. See `issues.txt` and the
+INIT update's "Where we are / Next step" for the full handoff.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
