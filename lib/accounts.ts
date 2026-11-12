@@ -17,7 +17,15 @@ export interface Account {
   status: AccountStatus;
   sortOrder: number;
   connectedAt: string;
+  /**
+   * When access lapses if the app isn't used: Microsoft personal-account refresh
+   * tokens expire after 90 days of inactivity, and every refresh re-issues one.
+   */
+  accessExpiresAt: string;
 }
+
+/** Sliding lifetime of a Microsoft personal-account refresh token. */
+const REFRESH_TOKEN_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
 
 interface AccountRow {
   id: string;
@@ -29,7 +37,12 @@ interface AccountRow {
   status: AccountStatus;
   sort_order: number;
   connected_at: string;
+  token_refreshed_at: string | null;
+  updated_at: string;
 }
+
+/** SQLite `datetime('now')` is UTC without a zone marker. */
+const sqliteUtc = (s: string) => Date.parse(`${s.replace(" ", "T")}Z`);
 
 function toAccount(r: AccountRow): Account {
   return {
@@ -42,11 +55,15 @@ function toAccount(r: AccountRow): Account {
     status: r.status,
     sortOrder: r.sort_order,
     connectedAt: r.connected_at,
+    accessExpiresAt: new Date(
+      sqliteUtc(r.token_refreshed_at ?? r.updated_at) + REFRESH_TOKEN_LIFETIME_MS,
+    ).toISOString(),
   };
 }
 
 const SELECT = `
-  SELECT id, email, display_name, label, description, accent, status, sort_order, connected_at
+  SELECT id, email, display_name, label, description, accent, status, sort_order, connected_at,
+         token_refreshed_at, updated_at
   FROM accounts
 `;
 
@@ -84,13 +101,14 @@ export function upsertConnectedAccount(input: {
   const label = existing?.label ?? input.displayName ?? input.email ?? "OneDrive";
 
   db.prepare(
-    `INSERT INTO accounts (id, email, display_name, label, description, accent, status, refresh_token, sort_order, connected_at, updated_at)
-     VALUES (@id, @email, @display_name, @label, @description, @accent, 'connected', @refresh_token, @sort_order, datetime('now'), datetime('now'))
+    `INSERT INTO accounts (id, email, display_name, label, description, accent, status, refresh_token, sort_order, connected_at, updated_at, token_refreshed_at)
+     VALUES (@id, @email, @display_name, @label, @description, @accent, 'connected', @refresh_token, @sort_order, datetime('now'), datetime('now'), datetime('now'))
      ON CONFLICT(id) DO UPDATE SET
        email = excluded.email,
        display_name = excluded.display_name,
        status = 'connected',
        refresh_token = excluded.refresh_token,
+       token_refreshed_at = datetime('now'),
        updated_at = datetime('now')`,
   ).run({
     id: input.id,
@@ -115,7 +133,9 @@ export function getRefreshToken(id: string): string | null {
 }
 
 export function setRefreshToken(id: string, refreshToken: string): void {
-  db.prepare("UPDATE accounts SET refresh_token = ?, updated_at = datetime('now') WHERE id = ?").run(
+  db.prepare(
+    "UPDATE accounts SET refresh_token = ?, token_refreshed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+  ).run(
     encrypt(refreshToken),
     id,
   );

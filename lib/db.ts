@@ -105,7 +105,37 @@ function migrate(db: Database.Database): void {
   `);
 }
 
+/**
+ * Additive column/table changes. Idempotent, and run on every module load — not only
+ * on a fresh connection — because dev hot-reload reuses the cached connection.
+ */
+function evolve(db: Database.Database): void {
+  const addColumn = (table: string, column: string, ddl: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  };
+  // Transfers queue: lower priority runs first; heartbeat marks the row as live in
+  // *some* process (so a second server process never double-runs it).
+  addColumn("moves", "priority", "priority INTEGER NOT NULL DEFAULT 0");
+  addColumn("moves", "heartbeat_at", "heartbeat_at INTEGER");
+  // When Microsoft last issued this account a refresh token (drives "access until").
+  addColumn("accounts", "token_refreshed_at", "token_refreshed_at TEXT");
+  db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+}
+
 const globalForDb = globalThis as unknown as { __odmDb?: Database.Database };
 
 export const db: Database.Database = globalForDb.__odmDb ?? createConnection();
 if (process.env.NODE_ENV !== "production") globalForDb.__odmDb = db;
+evolve(db);
+
+export function getSetting(key: string): string | null {
+  const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string): void {
+  db.prepare(
+    "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  ).run(key, value);
+}

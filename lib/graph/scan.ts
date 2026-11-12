@@ -9,9 +9,6 @@ import { graphJson } from "@/lib/graph/client";
  *
  * OneDrive reports each folder's `size` as the recursive rollup of its contents, so
  * per-folder sizes are correct even when only one level has been fetched.
- *
- * An optional **full scan** walks everything (for account-wide analysis). It reuses
- * the same per-folder fetch and is cancellable.
  */
 
 interface DriveItem {
@@ -133,87 +130,4 @@ export function getFolderFetchedAt(accountId: string, folderId: string): string 
     .prepare("SELECT fetched_at FROM items WHERE account_id = ? AND item_id = ?")
     .get(accountId, folderId) as { fetched_at: string | null } | undefined;
   return row?.fetched_at ?? null;
-}
-
-// ─── Optional full scan (for account-wide analysis) ──────────────────────────
-
-const runningFull = new Set<string>();
-const cancelledFull = new Set<string>();
-
-class ScanCancelled extends Error {
-  constructor() {
-    super("Scan cancelled.");
-    this.name = "ScanCancelled";
-  }
-}
-
-export interface FullScanState {
-  status: "none" | "scanning" | "complete" | "partial" | "error";
-  items: number;
-  finishedAt: string | null;
-  error: string | null;
-  isRunning: boolean;
-}
-
-export function getFullScanState(accountId: string): FullScanState {
-  const row = db
-    .prepare("SELECT full_status, full_items, full_finished_at, full_error FROM scans WHERE account_id = ?")
-    .get(accountId) as
-    | { full_status: FullScanState["status"]; full_items: number; full_finished_at: string | null; full_error: string | null }
-    | undefined;
-  return {
-    status: row?.full_status ?? "none",
-    items: row?.full_items ?? 0,
-    finishedAt: row?.full_finished_at ?? null,
-    error: row?.full_error ?? null,
-    isRunning: runningFull.has(accountId),
-  };
-}
-
-export function cancelFullScan(accountId: string): boolean {
-  if (!runningFull.has(accountId)) return false;
-  cancelledFull.add(accountId);
-  return true;
-}
-
-export function startFullScan(accountId: string): void {
-  if (runningFull.has(accountId)) return;
-  runningFull.add(accountId);
-  void runFullScan(accountId).finally(() => {
-    runningFull.delete(accountId);
-    cancelledFull.delete(accountId);
-  });
-}
-
-async function runFullScan(accountId: string): Promise<void> {
-  db.prepare(
-    `INSERT INTO scans (account_id, full_status, full_items, full_finished_at, full_error)
-     VALUES (?, 'scanning', 0, NULL, NULL)
-     ON CONFLICT(account_id) DO UPDATE SET full_status='scanning', full_items=0, full_finished_at=NULL, full_error=NULL`,
-  ).run(accountId);
-
-  let count = 0;
-  try {
-    const rootId = await getRootId(accountId);
-    const queue: string[] = [rootId];
-    while (queue.length > 0) {
-      if (cancelledFull.has(accountId)) throw new ScanCancelled();
-      const folderId = queue.shift()!;
-      await ensureChildren(accountId, folderId, { force: true });
-      const subfolders = db
-        .prepare("SELECT item_id FROM items WHERE account_id = ? AND parent_id = ? AND is_folder = 1")
-        .all(accountId, folderId) as { item_id: string }[];
-      for (const s of subfolders) queue.push(s.item_id);
-      count = (db.prepare("SELECT COUNT(*) n FROM items WHERE account_id = ?").get(accountId) as { n: number }).n;
-      db.prepare("UPDATE scans SET full_items = ? WHERE account_id = ?").run(count, accountId);
-    }
-    db.prepare(
-      "UPDATE scans SET full_status='complete', full_items=?, full_finished_at=datetime('now') WHERE account_id=?",
-    ).run(count, accountId);
-  } catch (err) {
-    const cancelled = err instanceof ScanCancelled;
-    db.prepare(
-      "UPDATE scans SET full_status=?, full_error=?, full_finished_at=datetime('now') WHERE account_id=?",
-    ).run(cancelled ? "partial" : "error", cancelled ? "Cancelled — analysis covers folders scanned so far." : (err instanceof Error ? err.message : "Scan failed."), accountId);
-  }
 }

@@ -1,57 +1,96 @@
 import { randomUUID } from "node:crypto";
-import { db } from "@/lib/db";
+import { db, getSetting, setSetting } from "@/lib/db";
 import { graphFetch, graphJson } from "@/lib/graph/client";
 
 /**
- * Cross-account move: copy → verify → delete-source (Graph has no native move
- * between two different drives).
+ * Cross-account transfers: copy → verify → delete-source (Graph has no native move
+ * between two different drives), run as a **priority queue**.
  *
  * Designed to survive the real world of a 64 GB folder:
  *  - **Idempotent / resumable.** The target folder is reused across runs; a file
- *    already present on the target with a matching size is skipped. So a failure
- *    (transient 503, network blip, even a restart) doesn't reset anything — Resume
- *    just continues with the files that aren't there yet, even the next day.
+ *    already present on the target with a matching size is skipped. So a pause,
+ *    preemption, failure or restart doesn't reset anything — the next run just
+ *    continues with the files that aren't there yet.
  *  - **Retries transient errors** (429/5xx) with backoff instead of aborting.
  *  - **Source is deleted only after the whole tree is verified** on the target.
- *  - A non-cancel failure parks the job as 'paused' (target kept for resume); an
- *    explicit cancel cleans up the partial target.
  *
- * Large files are copied server-to-server via upload-from-URL (bytes never route
- * through this machine); a resilient streaming path is the fallback.
+ * Queue: one transfer runs at a time — the runnable row with the lowest `priority`.
+ * Reordering something above the active transfer preempts it (it goes back to
+ * `queued` and later resumes where it got to). A global pause stops the active one
+ * the same way and starts nothing until resumed. Removing a transfer cleans up its
+ * partial copy on the target; the source is never touched.
+ *
+ * Bytes stream through this machine chunk by chunk (nothing is written to disk);
+ * the live per-file download/upload counters are kept in memory for the UI.
  */
 
 const CHUNK = 327_680 * 20; // ~6 MiB, multiple of 320 KiB (upload-session requirement)
 const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
+const HEARTBEAT_MS = 5_000;
+const HEARTBEAT_STALE_MS = 20_000;
+const PAUSED_KEY = "transfers_paused";
+
+/**
+ * Whether this process may run transfers. Set ODM_TRANSFERS_WORKER=0 for a second
+ * server (e.g. a dev server next to the installed app) so it never runs a job.
+ */
+const IS_WORKER = process.env.ODM_TRANSFERS_WORKER !== "0";
+
+type StopReason = "cancel" | "pause";
+
+interface LiveFile {
+  name: string;
+  size: number;
+  downloaded: number; // bytes read from the source so far
+  uploaded: number; // bytes accepted by the target so far
+  serverSide: boolean; // target pulls straight from source (nothing via this machine)
+}
 
 // Process-wide, not module-wide: in a production build, instrumentation.ts (which
-// auto-resumes moves on boot) and the route handlers get *separate* instances of this
-// module. Module-level sets would make a boot-resumed move invisible to the API — shown
-// as "paused", resumable a second time, and cancel would miss it.
-const state = ((globalThis as { __odmMoveState?: ProcessMoveState }).__odmMoveState ??= {
+// auto-resumes transfers on boot) and the route handlers get *separate* instances of
+// this module. Module-level state would make a boot-resumed transfer invisible to the API.
+const state = ((globalThis as { __odmMoveQueue?: ProcessMoveState }).__odmMoveQueue ??= {
   running: new Set<string>(),
-  cancelled: new Set<string>(),
+  stopping: new Map<string, StopReason>(),
   serverSideCap: new Map<string, boolean>(), // moveId -> does upload-from-URL work?
+  live: new Map<string, LiveFile>(),
 });
-type ProcessMoveState = { running: Set<string>; cancelled: Set<string>; serverSideCap: Map<string, boolean> };
-const { running, cancelled, serverSideCap } = state;
+type ProcessMoveState = {
+  running: Set<string>;
+  stopping: Map<string, StopReason>;
+  serverSideCap: Map<string, boolean>;
+  live: Map<string, LiveFile>;
+};
+const { running, stopping, serverSideCap, live } = state;
 
-class MoveCancelled extends Error {
-  constructor() {
-    super("Move cancelled.");
-    this.name = "MoveCancelled";
+class MoveStopped extends Error {
+  constructor(public reason: StopReason) {
+    super(reason === "cancel" ? "Transfer removed." : "Transfer paused.");
+    this.name = "MoveStopped";
   }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function cancelMove(id: string): boolean {
-  if (!running.has(id)) return false;
-  cancelled.add(id);
-  return true;
+function throwIfStopped(id: string): void {
+  const reason = stopping.get(id);
+  if (reason) throw new MoveStopped(reason);
 }
 
-function throwIfCancelled(id: string): void {
-  if (cancelled.has(id)) throw new MoveCancelled();
+/** Sleep in short slices so a pause/remove takes effect promptly. */
+async function sleepUnlessStopped(id: string, ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    throwIfStopped(id);
+    await sleep(Math.min(1000, until - Date.now()));
+  }
+  throwIfStopped(id);
+}
+
+function liveUpdate(id: string | undefined, patch: Partial<LiveFile>): void {
+  if (!id) return;
+  const cur = live.get(id);
+  if (cur) live.set(id, { ...cur, ...patch });
 }
 
 interface DriveItem {
@@ -67,7 +106,11 @@ interface ChildrenPage {
   "@odata.nextLink"?: string;
 }
 
-export type MoveStatus = "copying" | "verifying" | "deleting" | "complete" | "error" | "cancelled" | "paused";
+/**
+ * `queued`   waiting its turn (or interrupted — it resumes where it got to)
+ * `stalled`  stopped after repeated failures; needs a manual retry
+ */
+export type MoveStatus = "queued" | "copying" | "deleting" | "complete" | "stalled";
 
 export interface MoveState {
   id: string;
@@ -79,34 +122,48 @@ export interface MoveState {
   filesDone: number;
   bytesTotal: number;
   bytesDone: number;
+  /** A transient error being auto-retried, or why the transfer stalled. */
   error: string | null;
+  priority: number;
   startedAt: string | null;
   finishedAt: string | null;
   isRunning: boolean;
+  /** The file streaming right now (only for the running transfer, in this process). */
+  current: LiveFile | null;
 }
 
 interface MoveRow {
   id: string;
   source_account: string;
   target_account: string;
+  item_id: string;
   item_name: string | null;
   is_folder: number;
-  status: MoveStatus;
+  status: string;
   files_done: number;
   bytes_total: number;
   bytes_done: number;
   error: string | null;
+  priority: number;
+  heartbeat_at: number | null;
   started_at: string | null;
   finished_at: string | null;
 }
 
+const ACTIVE = ["queued", "copying", "verifying", "deleting"];
+
+/** Running here, or heart-beating in another server process. */
+function isLive(r: Pick<MoveRow, "id" | "heartbeat_at">): boolean {
+  return running.has(r.id) || (r.heartbeat_at != null && Date.now() - r.heartbeat_at < HEARTBEAT_STALE_MS);
+}
+
 function rowToState(r: MoveRow): MoveState {
-  const isRunning = running.has(r.id);
-  // An "active" status with no live job (process died) is really paused/resumable.
-  let status = r.status;
-  if (!isRunning && (status === "copying" || status === "verifying" || status === "deleting")) {
-    status = "paused";
-  }
+  const isRunning = isLive(r);
+  let status: MoveStatus;
+  if (r.status === "complete") status = "complete";
+  else if (r.status === "paused" || r.status === "error" || r.status === "stalled") status = "stalled";
+  else if (!isRunning) status = "queued";
+  else status = r.status === "deleting" ? "deleting" : "copying";
   return {
     id: r.id,
     status,
@@ -118,90 +175,163 @@ function rowToState(r: MoveRow): MoveState {
     bytesTotal: r.bytes_total,
     bytesDone: r.bytes_done,
     error: r.error,
+    priority: r.priority,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
     isRunning,
+    current: live.get(r.id) ?? null,
   };
 }
 
 const SELECT =
-  "id, source_account, target_account, item_name, is_folder, status, files_done, bytes_total, bytes_done, error, started_at, finished_at";
+  "id, source_account, target_account, item_id, item_name, is_folder, status, files_done, bytes_total, bytes_done, error, priority, heartbeat_at, started_at, finished_at";
 
 export function getMoveState(id: string): MoveState | null {
   const r = db.prepare(`SELECT ${SELECT} FROM moves WHERE id = ?`).get(id) as MoveRow | undefined;
   return r ? rowToState(r) : null;
 }
 
-/** Active + recently-finished moves for the global tracker. */
-export function listRecentMoves(limit = 10): MoveState[] {
-  const rows = db
-    .prepare(`SELECT ${SELECT} FROM moves ORDER BY started_at DESC LIMIT ?`)
-    .all(limit) as MoveRow[];
-  return rows.map(rowToState);
+/** The queue (priority order) followed by the most recently finished transfers. */
+export function listMoves(): { paused: boolean; moves: MoveState[] } {
+  const queue = db
+    .prepare(`SELECT ${SELECT} FROM moves WHERE status NOT IN ('complete', 'cancelled') ORDER BY priority, started_at`)
+    .all() as MoveRow[];
+  const done = db
+    .prepare(`SELECT ${SELECT} FROM moves WHERE status = 'complete' ORDER BY finished_at DESC LIMIT 20`)
+    .all() as MoveRow[];
+  return { paused: isQueuePaused(), moves: [...queue, ...done].map(rowToState) };
 }
 
-export function startMove(input: {
-  sourceAccount: string;
-  targetAccount: string;
-  itemId: string;
-}): string {
+export function isQueuePaused(): boolean {
+  return getSetting(PAUSED_KEY) === "1";
+}
+
+/** Add a transfer to the bottom of the queue. */
+export function startMove(input: { sourceAccount: string; targetAccount: string; itemId: string }): string {
   const id = randomUUID();
+  const { p } = db.prepare("SELECT COALESCE(MAX(priority), -1) + 1 AS p FROM moves").get() as { p: number };
   db.prepare(
-    `INSERT INTO moves (id, source_account, target_account, item_id, status)
-     VALUES (?, ?, ?, ?, 'copying')`,
-  ).run(id, input.sourceAccount, input.targetAccount, input.itemId);
-  launch(id, { ...input });
+    `INSERT INTO moves (id, source_account, target_account, item_id, status, priority)
+     VALUES (?, ?, ?, ?, 'queued', ?)`,
+  ).run(id, input.sourceAccount, input.targetAccount, input.itemId, p);
+  schedule();
   return id;
 }
 
-/** Resume a paused/failed move — same source/target, continues where it left off. */
-export function resumeMove(id: string): boolean {
-  const row = db.prepare("SELECT source_account, target_account, item_id, status FROM moves WHERE id = ?").get(id) as
-    | { source_account: string; target_account: string; item_id: string; status: MoveStatus }
-    | undefined;
-  if (!row) return false;
-  if (running.has(id)) return true; // already going
-  db.prepare("UPDATE moves SET status = 'copying', error = NULL, finished_at = NULL WHERE id = ?").run(id);
-  launch(id, { sourceAccount: row.source_account, targetAccount: row.target_account, itemId: row.item_id });
-  return true;
+/** Put a stalled transfer back in the queue (it continues where it left off). */
+export function retryMove(id: string): boolean {
+  const res = db
+    .prepare(
+      "UPDATE moves SET status = 'queued', error = NULL, finished_at = NULL WHERE id = ? AND status IN ('paused', 'error', 'stalled')",
+    )
+    .run(id);
+  schedule();
+  return res.changes > 0;
+}
+
+/** Pause or resume the whole queue. Pausing stops the active transfer (resumable). */
+export function setQueuePaused(paused: boolean): void {
+  setSetting(PAUSED_KEY, paused ? "1" : "0");
+  if (paused) for (const id of running) stopping.set(id, "pause");
+  else schedule();
+}
+
+/** New priority order (first = runs first). May preempt the active transfer. */
+export function reorderMoves(ids: string[]): void {
+  const stmt = db.prepare("UPDATE moves SET priority = ? WHERE id = ?");
+  db.transaction(() => ids.forEach((id, i) => stmt.run(i, id)))();
+  schedule();
 }
 
 /**
- * Relaunch moves that were mid-flight when the process stopped.
- *
- * A move runs in-memory, so a restart (crash, reboot, redeploy) leaves its row in an
- * active status — `copying` / `verifying` / `deleting` — with nothing driving it. On
- * boot we pick those up and continue automatically; the move is idempotent, so it just
- * carries on with the files not yet copied. This is what makes an always-on host truly
- * hands-off: you start a move, close the laptop, and it finishes server-side with no
- * Resume click — even across a server restart.
- *
- * `paused` moves are deliberately skipped: a move only parks there after 25× auto-retry
- * failed, which means something is actually wrong — that one still waits for a human.
+ * Remove a transfer from the queue. Its partial copy on the target is deleted; the
+ * source is untouched (it's only ever deleted after a fully verified copy).
  */
-export function resumeInterruptedMoves(): number {
-  const rows = db
-    .prepare("SELECT id FROM moves WHERE status IN ('copying', 'verifying', 'deleting')")
-    .all() as { id: string }[];
-  let resumed = 0;
-  for (const { id } of rows) {
-    if (resumeMove(id)) resumed++;
+export async function removeMove(id: string): Promise<boolean> {
+  const row = db.prepare(`SELECT ${SELECT} FROM moves WHERE id = ?`).get(id) as MoveRow | undefined;
+  if (!row || row.status === "complete") return false;
+  if (running.has(id)) {
+    stopping.set(id, "cancel"); // the runner cleans up, then the queue moves on
+    return true;
   }
-  if (resumed > 0) console.log(`[move] resumed ${resumed} interrupted move(s) on startup`);
-  return resumed;
+  if (isLive(row)) return false; // running in another process — not ours to stop
+  db.prepare("UPDATE moves SET status = 'cancelled' WHERE id = ?").run(id);
+  await deletePartialCopy(id, row.target_account);
+  db.prepare("DELETE FROM moves WHERE id = ?").run(id);
+  return true;
 }
 
-function launch(id: string, input: { sourceAccount: string; targetAccount: string; itemId: string }): void {
+/** Forget finished transfers. */
+export function clearFinishedMoves(): void {
+  db.prepare("DELETE FROM moves WHERE status IN ('complete', 'cancelled')").run();
+}
+
+/**
+ * Boot hook: transfers that were mid-flight when the process stopped are still
+ * `copying`/`deleting` rows with nothing driving them — they're simply runnable, so
+ * the scheduler picks the top one and continues it where it left off.
+ */
+export function resumeInterruptedMoves(): void {
+  schedule();
+}
+
+/**
+ * Make the top runnable transfer the one that's running. Called after every queue
+ * change and whenever a run ends.
+ */
+export function schedule(): void {
+  if (!IS_WORKER || isQueuePaused()) return;
+  const placeholders = ACTIVE.map(() => "?").join(",");
+  const next = db
+    .prepare(`SELECT id FROM moves WHERE status IN (${placeholders}) ORDER BY priority, started_at LIMIT 1`)
+    .get(...ACTIVE) as { id: string } | undefined;
+
+  const current = [...running][0];
+  if (current) {
+    // Something higher-priority was put on top → preempt (it resumes later).
+    if (next && next.id !== current && !stopping.has(current)) stopping.set(current, "pause");
+    return;
+  }
+  if (!next) return;
+  // Never double-run a job another server process is driving.
+  const elsewhere = db
+    .prepare(`SELECT 1 FROM moves WHERE heartbeat_at > ? AND status IN (${placeholders})`)
+    .get(Date.now() - HEARTBEAT_STALE_MS, ...ACTIVE);
+  if (elsewhere) return;
+  launch(next.id);
+}
+
+function launch(id: string): void {
+  const row = db.prepare("SELECT source_account, target_account, item_id FROM moves WHERE id = ?").get(id) as
+    | { source_account: string; target_account: string; item_id: string }
+    | undefined;
+  if (!row) return;
   running.add(id);
-  void runMove(id, input).finally(() => {
-    running.delete(id);
-    cancelled.delete(id);
-    serverSideCap.delete(id);
-  });
+  const beat = () => db.prepare("UPDATE moves SET heartbeat_at = ? WHERE id = ?").run(Date.now(), id);
+  beat();
+  const timer = setInterval(beat, HEARTBEAT_MS);
+  void runMove(id, { sourceAccount: row.source_account, targetAccount: row.target_account, itemId: row.item_id })
+    .catch((e) => console.error("[move] runner crashed", e))
+    .finally(() => {
+      clearInterval(timer);
+      db.prepare("UPDATE moves SET heartbeat_at = NULL WHERE id = ?").run(id);
+      running.delete(id);
+      stopping.delete(id);
+      serverSideCap.delete(id);
+      live.delete(id);
+      schedule();
+    });
 }
 
+/**
+ * Progress never goes backwards: each (re)run re-walks the tree from zero, counting
+ * files already on the target as it skips them, so the stored high-water mark stays
+ * truthful while the walk catches up.
+ */
 function setProgress(id: string, filesDone: number, bytesDone: number) {
-  db.prepare("UPDATE moves SET files_done = ?, bytes_done = ? WHERE id = ?").run(filesDone, bytesDone, id);
+  db.prepare(
+    "UPDATE moves SET files_done = MAX(files_done, ?), bytes_done = MAX(bytes_done, ?) WHERE id = ?",
+  ).run(filesDone, bytesDone, id);
 }
 function newItemId(id: string): string | null {
   const r = db.prepare("SELECT new_item_id FROM moves WHERE id = ?").get(id) as { new_item_id: string | null } | undefined;
@@ -209,62 +339,65 @@ function newItemId(id: string): string | null {
 }
 
 /**
- * Drive the move with automatic retry. Because the copy is idempotent (skips files
- * already on the target), a transient failure just retries the pass and continues —
- * no user action. It only parks as 'paused' for a manual Resume after many automatic
- * attempts, or stops immediately on an explicit cancel.
+ * Drive the transfer with automatic retry. Because the copy is idempotent (skips files
+ * already on the target), a transient failure just retries the pass and continues.
+ * It stalls for a manual retry only after many automatic attempts.
  */
 async function runMove(
   id: string,
   input: { sourceAccount: string; targetAccount: string; itemId: string },
 ): Promise<void> {
-  const { targetAccount } = input;
   const MAX_ATTEMPTS = 25;
+  db.prepare("UPDATE moves SET status = 'copying', finished_at = NULL WHERE id = ? AND status <> 'deleting'").run(id);
 
   for (let attempt = 1; ; attempt++) {
     try {
       await attemptMove(id, input);
       return; // success
     } catch (err) {
-      if (err instanceof MoveCancelled) {
-        await cleanupAfterCancel(id, targetAccount);
-        return;
-      }
-      const message = err instanceof Error ? err.message : "Move failed.";
+      if (err instanceof MoveStopped) return onStopped(id, input.targetAccount, err.reason);
+      const message = err instanceof Error ? err.message : "Transfer failed.";
       if (attempt >= MAX_ATTEMPTS) {
         db.prepare(
-          "UPDATE moves SET status = 'paused', error = ?, finished_at = datetime('now') WHERE id = ?",
-        ).run(`${message} — auto-retried ${attempt}×. Click Resume to keep trying.`, id);
+          "UPDATE moves SET status = 'stalled', error = ?, finished_at = datetime('now') WHERE id = ?",
+        ).run(`${message} — auto-retried ${attempt}×.`, id);
         return;
       }
       // Auto-retry (resumes from where it got to). Back off, but keep going.
-      const wait = Math.min(2 ** attempt, 60);
-      db.prepare("UPDATE moves SET status = 'copying', error = ? WHERE id = ?").run(
+      db.prepare("UPDATE moves SET error = ? WHERE id = ?").run(
         `${message} — retrying automatically (attempt ${attempt + 1})…`,
         id,
       );
-      await sleep(wait * 1000);
-      if (cancelled.has(id)) {
-        await cleanupAfterCancel(id, targetAccount);
-        return;
+      live.delete(id);
+      try {
+        await sleepUnlessStopped(id, Math.min(2 ** attempt, 60) * 1000);
+      } catch (e) {
+        if (e instanceof MoveStopped) return onStopped(id, input.targetAccount, e.reason);
+        throw e;
       }
     }
   }
 }
 
-async function cleanupAfterCancel(id: string, targetAccount: string): Promise<void> {
-  const partial = newItemId(id);
-  if (partial) {
-    try {
-      await graphFetch(targetAccount, `/me/drive/items/${partial}`, { method: "DELETE" });
-    } catch {
-      /* leave it */
-    }
-    db.prepare("UPDATE moves SET new_item_id = NULL WHERE id = ?").run(id);
+async function onStopped(id: string, targetAccount: string, reason: StopReason): Promise<void> {
+  if (reason === "pause") {
+    // Paused or preempted: back in the queue, partial copy kept for the next run.
+    db.prepare("UPDATE moves SET status = 'queued', error = NULL WHERE id = ?").run(id);
+    return;
   }
-  db.prepare(
-    "UPDATE moves SET status = 'cancelled', error = 'Cancelled. Source intact; partial copy removed.', finished_at = datetime('now') WHERE id = ?",
-  ).run(id);
+  db.prepare("UPDATE moves SET status = 'cancelled' WHERE id = ?").run(id);
+  await deletePartialCopy(id, targetAccount);
+  db.prepare("DELETE FROM moves WHERE id = ?").run(id);
+}
+
+async function deletePartialCopy(id: string, targetAccount: string): Promise<void> {
+  const partial = newItemId(id);
+  if (!partial) return;
+  try {
+    await graphFetch(targetAccount, `/me/drive/items/${partial}`, { method: "DELETE" });
+  } catch {
+    /* leave it */
+  }
 }
 
 /** One copy→verify→delete pass. Throws on failure (the caller retries). */
@@ -344,10 +477,10 @@ async function copyFolder(
   let url: string | null = `/me/drive/items/${sourceFolderId}/children?$top=200&$select=id,name,size,folder,file`;
   let absolute = false;
   while (url) {
-    throwIfCancelled(moveId);
+    throwIfStopped(moveId);
     const page: ChildrenPage = await graphJson<ChildrenPage>(sourceAccount, url, { absolute });
     for (const child of page.value ?? []) {
-      throwIfCancelled(moveId);
+      throwIfStopped(moveId);
       const name = child.name ?? "(unnamed)";
       if (!child.file) {
         // folder: find-or-create on target, then recurse
@@ -446,12 +579,14 @@ async function copyFile(
   const size = item.size ?? 0;
   const encoded = encodeURIComponent(name);
   const downloadUrl = await getDownloadUrl(sourceAccount, item.id, name);
+  live.set(moveId, { name, size, downloaded: 0, uploaded: 0, serverSide: false });
 
   // Try server-to-server (upload-from-URL) ONCE per move. Many personal accounts
   // reject it ("sourceUrl not supported"); once we learn that, skip it for the rest
   // of the move and stream directly instead of wasting an attempt on every file.
   if (serverSideCap.get(moveId) !== false) {
     try {
+      liveUpdate(moveId, { serverSide: true });
       const result = await uploadFromUrl(targetAccount, targetParentId, name, downloadUrl, size, moveId, progress);
       if (serverSideCap.get(moveId) !== true) {
         serverSideCap.set(moveId, true);
@@ -460,6 +595,7 @@ async function copyFile(
       return result;
     } catch (e) {
       serverSideCap.set(moveId, false);
+      liveUpdate(moveId, { serverSide: false, downloaded: 0, uploaded: 0 });
       console.log(`[move] server-to-server unavailable (${e instanceof Error ? e.message : e}) — streaming through this machine from here on`);
     }
   }
@@ -470,12 +606,14 @@ async function copyFile(
     const src = await resilientFetch(downloadUrl);
     if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
     const buf = new Uint8Array(await src.arrayBuffer());
+    liveUpdate(moveId, { downloaded: buf.length });
     const res = await graphFetch(
       targetAccount,
       `/me/drive/items/${targetParentId}:/${encoded}:/content?@microsoft.graph.conflictBehavior=replace`,
       { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf },
     );
     if (!res.ok) throw new Error(`Upload of "${name}" failed (${res.status}).`);
+    liveUpdate(moveId, { uploaded: size });
     onProgress(size);
     return (await res.json()) as DriveItem;
   }
@@ -508,7 +646,7 @@ async function uploadFromUrl(
   const MAX_MS = 6 * 60 * 60 * 1000;
   while (Date.now() - started < MAX_MS) {
     await sleep(3000);
-    throwIfCancelled(moveId);
+    throwIfStopped(moveId);
     let mon: Response;
     try {
       mon = await fetch(monitorUrl, { redirect: "manual", headers: { Accept: "application/json" } });
@@ -525,7 +663,9 @@ async function uploadFromUrl(
       if (body?.id && body?.size !== undefined) return { id: body.id, name: body.name, size: body.size };
       const status: string | undefined = body?.status;
       const pct = Number(body?.percentageComplete ?? 0);
-      setProgress(moveId, progress.files, progress.bytes + Math.floor((size * pct) / 100));
+      const moved = Math.floor((size * pct) / 100);
+      liveUpdate(moveId, { downloaded: moved, uploaded: moved });
+      setProgress(moveId, progress.files, progress.bytes + moved);
       if (status === "completed" && body?.resourceId) {
         const resourceId = String(body.resourceId).replace(/^driveItem_/, "");
         return graphJson<DriveItem>(targetAccount, `/me/drive/items/${resourceId}?$select=id,name,size`);
@@ -594,15 +734,19 @@ async function streamLargeFile(
   }
 
   while (!done) {
-    if (moveId) throwIfCancelled(moveId); // allow cancelling mid-file
+    if (moveId) throwIfStopped(moveId); // allow cancelling mid-file
     const { value, done: d } = await reader.read();
-    if (value) carry = Buffer.concat([carry, Buffer.from(value)]);
+    if (value) {
+      carry = Buffer.concat([carry, Buffer.from(value)]);
+      liveUpdate(moveId, { downloaded: (live.get(moveId ?? "")?.downloaded ?? 0) + value.length });
+    }
     done = d;
     while (carry.length >= CHUNK) {
-      if (moveId) throwIfCancelled(moveId);
+      if (moveId) throwIfStopped(moveId);
       await put(Buffer.from(carry.subarray(0, CHUNK)), offset);
       offset += CHUNK;
       carry = carry.subarray(CHUNK);
+      liveUpdate(moveId, { uploaded: offset });
       onProgress?.(offset); // live within-file progress
     }
   }

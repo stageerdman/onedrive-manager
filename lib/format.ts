@@ -50,3 +50,14 @@ export function stalenessLevel(iso: string | null): Staleness {
   if (diff > 6 * MS.month) return "aging";
   return "fresh";
 }
+
+/** "10 Feb" style short date. */
+export function formatDayMonth(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+/** Whole days from now until `iso` (negative when past). */
+export function daysUntil(iso: string): number {
+  return Math.floor((Date.parse(iso) - Date.now()) / MS.day);
+}

@@ -94,39 +94,3 @@ export function breadcrumbs(accountId: string, itemId: string): Item[] {
   }
   return chain;
 }
-
-/**
- * Account-wide analysis over whatever is cached. With lazy browsing this covers the
- * folders opened so far; a full scan makes it complete. The root row is excluded.
- */
-export function biggestFiles(accountId: string, limit = 100): Item[] {
-  return db
-    .prepare(
-      `SELECT ${COLS} FROM items WHERE account_id = ? AND is_folder = 0 ORDER BY size DESC LIMIT ?`,
-    )
-    .all(accountId, limit)
-    .map((r) => toItem(r as ItemRow));
-}
-
-export function biggestFolders(accountId: string, limit = 100): Item[] {
-  return db
-    .prepare(
-      `SELECT ${COLS} FROM items
-       WHERE account_id = ? AND is_folder = 1 AND parent_id IS NOT NULL
-       ORDER BY size DESC LIMIT ?`,
-    )
-    .all(accountId, limit)
-    .map((r) => toItem(r as ItemRow));
-}
-
-/** Stale files by "Cleanup score" = size × age (age from `modified`, the honest proxy). */
-export function staleFiles(accountId: string, limit = 100): Item[] {
-  return db
-    .prepare(
-      `SELECT ${COLS} FROM items
-       WHERE account_id = ? AND is_folder = 0 AND modified IS NOT NULL
-       ORDER BY size * (julianday('now') - julianday(modified)) DESC LIMIT ?`,
-    )
-    .all(accountId, limit)
-    .map((r) => toItem(r as ItemRow));
-}
