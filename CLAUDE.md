@@ -83,6 +83,9 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `app/` — App Router routes (overview, account detail, auth callback, API routes).
 - `components/` — reusable shadcn/ui-based components (account card, space meter, item row, …).
 - `lib/` — Graph client, OAuth/token handling, scan logic, persistence.
+- `mac/` — native macOS launcher (Swift + WKWebView). `mac/build-app.sh` runs `next build` and
+  installs `~/Applications/OneDrive Manager.app`, which starts `next start` on :3000 (or reuses
+  a running instance) and stops it on quit. Re-run the script after code changes.
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
 ## Secrets (see `.env`, never committed)
