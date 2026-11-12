@@ -46,24 +46,29 @@ interface LiveFile {
   serverSide: boolean; // target pulls straight from source (nothing via this machine)
 }
 
-// Process-wide, not module-wide: in a production build, instrumentation.ts (which
-// auto-resumes transfers on boot) and the route handlers get *separate* instances of
-// this module. Module-level state would make a boot-resumed transfer invisible to the API.
-const state = ((globalThis as { __odmMoveQueue?: ProcessMoveState }).__odmMoveQueue ??= {
+// Runner-local state. In a production build, instrumentation.ts (boot auto-resume) and
+// the route handlers do NOT reliably share memory, so nothing here is used to talk
+// between them: every control signal (pause, remove, preempt) and the live per-file
+// progress travel through the database. This is only the runner's own bookkeeping.
+const state = ((globalThis as { __odmMoveRunner?: RunnerState }).__odmMoveRunner ??= {
   running: new Set<string>(),
-  stopping: new Map<string, StopReason>(),
   serverSideCap: new Map<string, boolean>(), // moveId -> does upload-from-URL work?
   live: new Map<string, LiveFile>(),
+  lastCheck: new Map<string, number>(),
+  lastFlush: new Map<string, number>(),
   recheck: null,
 });
-type ProcessMoveState = {
+type RunnerState = {
   running: Set<string>;
-  stopping: Map<string, StopReason>;
   serverSideCap: Map<string, boolean>;
   live: Map<string, LiveFile>;
+  lastCheck: Map<string, number>;
+  lastFlush: Map<string, number>;
   recheck: ReturnType<typeof setTimeout> | null;
 };
-const { running, stopping, serverSideCap, live } = state;
+const { running, serverSideCap, live } = state;
+const CHECK_EVERY_MS = 750;
+const FLUSH_EVERY_MS = 1_000;
 
 class MoveStopped extends Error {
   constructor(public reason: StopReason) {
@@ -74,8 +79,22 @@ class MoveStopped extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Why this transfer should stop now, if at all — read from the DB (any context can ask). */
+function stopReason(id: string): StopReason | null {
+  const row = db.prepare("SELECT control FROM moves WHERE id = ?").get(id) as { control: string | null } | undefined;
+  if (!row || row.control === "remove") return "cancel";
+  if (isQueuePaused()) return "pause";
+  const top = topRunnable();
+  if (top && top !== id) return "pause"; // something was put above us → preempted
+  return null;
+}
+
+/** Checkpoint (throttled): throws if the transfer was paused, preempted or removed. */
 function throwIfStopped(id: string): void {
-  const reason = stopping.get(id);
+  const now = Date.now();
+  if (now - (state.lastCheck.get(id) ?? 0) < CHECK_EVERY_MS) return;
+  state.lastCheck.set(id, now);
+  const reason = stopReason(id);
   if (reason) throw new MoveStopped(reason);
 }
 
@@ -89,10 +108,31 @@ async function sleepUnlessStopped(id: string, ms: number): Promise<void> {
   throwIfStopped(id);
 }
 
+/** Start tracking a new current file (flushed to the DB immediately). */
+function liveStart(id: string, file: LiveFile): void {
+  live.set(id, file);
+  flushLive(id, true);
+}
+
 function liveUpdate(id: string | undefined, patch: Partial<LiveFile>): void {
   if (!id) return;
   const cur = live.get(id);
-  if (cur) live.set(id, { ...cur, ...patch });
+  if (!cur) return;
+  live.set(id, { ...cur, ...patch });
+  flushLive(id, false);
+}
+
+function liveClear(id: string): void {
+  live.delete(id);
+  db.prepare("UPDATE moves SET live_json = NULL WHERE id = ?").run(id);
+}
+
+function flushLive(id: string, force: boolean): void {
+  const now = Date.now();
+  if (!force && now - (state.lastFlush.get(id) ?? 0) < FLUSH_EVERY_MS) return;
+  state.lastFlush.set(id, now);
+  const cur = live.get(id);
+  db.prepare("UPDATE moves SET live_json = ? WHERE id = ?").run(cur ? JSON.stringify(cur) : null, id);
 }
 
 interface DriveItem {
@@ -148,6 +188,7 @@ interface MoveRow {
   error: string | null;
   priority: number;
   heartbeat_at: number | null;
+  live_json: string | null;
   started_at: string | null;
   finished_at: string | null;
 }
@@ -181,12 +222,12 @@ function rowToState(r: MoveRow): MoveState {
     startedAt: r.started_at,
     finishedAt: r.finished_at,
     isRunning,
-    current: live.get(r.id) ?? null,
+    current: isRunning && r.live_json ? (JSON.parse(r.live_json) as LiveFile) : null,
   };
 }
 
 const SELECT =
-  "id, source_account, target_account, item_id, item_name, is_folder, status, files_done, bytes_total, bytes_done, error, priority, heartbeat_at, started_at, finished_at";
+  "id, source_account, target_account, item_id, item_name, is_folder, status, files_done, bytes_total, bytes_done, error, priority, heartbeat_at, live_json, started_at, finished_at";
 
 export function getMoveState(id: string): MoveState | null {
   const r = db.prepare(`SELECT ${SELECT} FROM moves WHERE id = ?`).get(id) as MoveRow | undefined;
@@ -233,9 +274,8 @@ export function retryMove(id: string): boolean {
 
 /** Pause or resume the whole queue. Pausing stops the active transfer (resumable). */
 export function setQueuePaused(paused: boolean): void {
-  setSetting(PAUSED_KEY, paused ? "1" : "0");
-  if (paused) for (const id of running) stopping.set(id, "pause");
-  else schedule();
+  setSetting(PAUSED_KEY, paused ? "1" : "0"); // the runner sees it at its next checkpoint
+  if (!paused) schedule();
 }
 
 /** New priority order (first = runs first). May preempt the active transfer. */
@@ -252,11 +292,11 @@ export function reorderMoves(ids: string[]): void {
 export async function removeMove(id: string): Promise<boolean> {
   const row = db.prepare(`SELECT ${SELECT} FROM moves WHERE id = ?`).get(id) as MoveRow | undefined;
   if (!row || row.status === "complete") return false;
-  if (running.has(id)) {
-    stopping.set(id, "cancel"); // the runner cleans up, then the queue moves on
+  if (isLive(row)) {
+    // The runner (whichever context it's in) cleans up, then the queue moves on.
+    db.prepare("UPDATE moves SET control = 'remove' WHERE id = ?").run(id);
     return true;
   }
-  if (isLive(row)) return false; // running in another process — not ours to stop
   db.prepare("UPDATE moves SET status = 'cancelled' WHERE id = ?").run(id);
   await deletePartialCopy(id, row.target_account);
   db.prepare("DELETE FROM moves WHERE id = ?").run(id);
@@ -274,6 +314,14 @@ export function clearFinishedMoves(): void {
  * the scheduler picks the top one and continues it where it left off.
  */
 export function resumeInterruptedMoves(): void {
+  // Finish removals whose runner died before it could clean up.
+  const orphans = db
+    .prepare("SELECT id FROM moves WHERE control = 'remove' AND (heartbeat_at IS NULL OR heartbeat_at < ?)")
+    .all(Date.now() - HEARTBEAT_STALE_MS) as { id: string }[];
+  for (const { id } of orphans) {
+    db.prepare("UPDATE moves SET control = NULL WHERE id = ?").run(id);
+    void removeMove(id);
+  }
   schedule();
 }
 
@@ -281,22 +329,24 @@ export function resumeInterruptedMoves(): void {
  * Make the top runnable transfer the one that's running. Called after every queue
  * change and whenever a run ends.
  */
-export function schedule(): void {
-  if (!IS_WORKER || isQueuePaused()) return;
+function topRunnable(): string | null {
   const placeholders = ACTIVE.map(() => "?").join(",");
-  const next = db
-    .prepare(`SELECT id FROM moves WHERE status IN (${placeholders}) ORDER BY priority, started_at LIMIT 1`)
+  const row = db
+    .prepare(
+      `SELECT id FROM moves WHERE status IN (${placeholders}) AND control IS NULL ORDER BY priority, started_at LIMIT 1`,
+    )
     .get(...ACTIVE) as { id: string } | undefined;
+  return row?.id ?? null;
+}
 
-  const current = [...running][0];
-  if (current) {
-    // Something higher-priority was put on top → preempt (it resumes later).
-    if (next && next.id !== current && !stopping.has(current)) stopping.set(current, "pause");
-    return;
-  }
+export function schedule(): void {
+  if (!IS_WORKER || isQueuePaused() || running.size > 0) return;
+  const next = topRunnable();
   if (!next) return;
-  // Never double-run a job another server process is driving. A heartbeat can also be
-  // left behind by a process that just died (e.g. app restart), so look again once it
+  const placeholders = ACTIVE.map(() => "?").join(",");
+  // One transfer at a time, across every context/process: a fresh heartbeat means one
+  // is running (it notices preemption itself and hands over when it stops). A heartbeat
+  // can also be left by a process that just died (app restart), so look again once it
   // would have gone stale.
   const elsewhere = db
     .prepare(`SELECT 1 FROM moves WHERE heartbeat_at > ? AND status IN (${placeholders})`)
@@ -310,7 +360,7 @@ export function schedule(): void {
     }
     return;
   }
-  launch(next.id);
+  launch(next);
 }
 
 function launch(id: string): void {
@@ -326,11 +376,12 @@ function launch(id: string): void {
     .catch((e) => console.error("[move] runner crashed", e))
     .finally(() => {
       clearInterval(timer);
-      db.prepare("UPDATE moves SET heartbeat_at = NULL WHERE id = ?").run(id);
+      db.prepare("UPDATE moves SET heartbeat_at = NULL, live_json = NULL WHERE id = ?").run(id);
       running.delete(id);
-      stopping.delete(id);
       serverSideCap.delete(id);
       live.delete(id);
+      state.lastCheck.delete(id);
+      state.lastFlush.delete(id);
       schedule();
     });
 }
@@ -380,7 +431,7 @@ async function runMove(
         `${message} — retrying automatically (attempt ${attempt + 1})…`,
         id,
       );
-      live.delete(id);
+      liveClear(id);
       try {
         await sleepUnlessStopped(id, Math.min(2 ** attempt, 60) * 1000);
       } catch (e) {
@@ -591,7 +642,7 @@ async function copyFile(
   const size = item.size ?? 0;
   const encoded = encodeURIComponent(name);
   const downloadUrl = await getDownloadUrl(sourceAccount, item.id, name);
-  live.set(moveId, { name, size, downloaded: 0, uploaded: 0, serverSide: false });
+  liveStart(moveId, { name, size, downloaded: 0, uploaded: 0, serverSide: false });
 
   // Try server-to-server (upload-from-URL) ONCE per move. Many personal accounts
   // reject it ("sourceUrl not supported"); once we learn that, skip it for the rest

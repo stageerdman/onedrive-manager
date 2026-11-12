@@ -118,6 +118,10 @@ function evolve(db: Database.Database): void {
   // *some* process (so a second server process never double-runs it).
   addColumn("moves", "priority", "priority INTEGER NOT NULL DEFAULT 0");
   addColumn("moves", "heartbeat_at", "heartbeat_at INTEGER");
+  // Cross-context signalling: in a production build the boot hook and the route handlers
+  // don't share memory, so "remove" requests and live per-file progress go via the DB.
+  addColumn("moves", "control", "control TEXT");
+  addColumn("moves", "live_json", "live_json TEXT");
   // When Microsoft last issued this account a refresh token (drives "access until").
   addColumn("accounts", "token_refreshed_at", "token_refreshed_at TEXT");
   db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
