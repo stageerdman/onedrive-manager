@@ -18,3 +18,16 @@
   a negative-z fixed background; body is `bg-transparent`.
 - **Access expiry** = `token_refreshed_at` + 90 days (Microsoft personal-account refresh tokens
   slide on use); falls back to `updated_at` for rows from before the column existed.
+- **Prod contexts don't share memory.** In `next start`, the instrumentation boot hook and
+  route handlers didn't reliably share `globalThis` state: a UI pause never reached a
+  boot-resumed runner. All control now goes through the DB: `app_settings.transfers_paused`,
+  `moves.control = 'remove'`, preemption = "am I still `topRunnable()`?", live file progress
+  = `moves.live_json` (flushed ~1 s). The runner checks at throttled checkpoints (750 ms).
+- **Stray second server (2026-11-12).** An orphaned `next dev` (port 3011, started 17:04 by an
+  earlier session, logging to `.devserver.log`) shared the DB and ran the old engine, so two
+  runners uploaded the same file at once. That's the likely cause of the repeated 409 on
+  "27-Bonus Q and A Examples.mp4". It was killed. Before blaming the engine, check
+  `ps … | grep next-server`.
+- **Throughput.** Each chunk is downloaded, then uploaded, strictly in turn (no overlap), so a
+  large file runs at roughly 1/(1/down + 1/up). Overlapping the next chunk's download with the
+  current upload is the obvious speed-up if needed.

@@ -20,8 +20,13 @@ Transfers, Settings), and Transfers as a real priority queue with pause.
    down/up bar, overall progress, retry notice; queue with drag + ↑/↓ + Alt+arrows; Pause;
    Add-transfer dialog (From → What → To); Done list with Clear. ✅
 6. **Settings** — rename, clear cache, disconnect. ✅
-7. **Verify** on the real app (Mac app rebuild) — pause/resume/queue against the live move.
+7. **Verify** on the real app (Mac app rebuild) — pause/resume/queue against the live move. ✅
 
 ## Status
 Phases 1–6 built; lint + typecheck clean; screens verified via headless screenshots on an
 isolated dev server (`ODM_TRANSFERS_WORKER=0`, port 3418).
+
+Verified on the rebuilt Mac app against the live "Jeremy Miner" move: auto-resume on boot,
+pause (runner stops at its next checkpoint, status → queued), resume, live current-file
+counters, monotonic progress. Not exercised live: reorder/preempt and remove (needs a
+second real transfer; logic is DB-driven via `topRunnable()` / `control`).
