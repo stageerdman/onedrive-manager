@@ -30,3 +30,9 @@ Verified on the rebuilt Mac app against the live "Jeremy Miner" move: auto-resum
 pause (runner stops at its next checkpoint, status → queued), resume, live current-file
 counters, monotonic progress. Not exercised live: reorder/preempt and remove (needs a
 second real transfer; logic is DB-driven via `topRunnable()` / `control`).
+
+## Where we stopped (2026-11-12)
+All phases are shipped in the Mac app and pushed. The queue was left **paused** by the owner,
+with the live move at ~52%. Next steps are in `issues.txt` → "NEXT": live-test
+reorder/preempt/remove, confirm the 409s are gone now the stray server is dead, and the
+optional download/upload overlap.

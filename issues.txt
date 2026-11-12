@@ -47,15 +47,23 @@ each section. See the INIT update in updates/ for the full build roadmap.
   mid-file, with a persistent progress tracker. Source deleted only after full verify.
 - Build + tsc + lint clean throughout; server binds 127.0.0.1 only.
 
-## In progress (resume anytime)
-- A ~64 GB "Jeremy Miner" move (→ Soren) was mid-flight at handoff. It's resumable: open
-  the app, find it in the tracker (bottom), hit Resume — it skips what's copied and
-  continues. It will be slow (bandwidth-bound, streams through the computer) — expected.
+## In progress (resume anytime) — as of 2026-11-12
+- "Jeremy Miner" move (Stage Erdman → Soren Osha, ~65 GB) at ~37 GB / 52%. The queue is
+  PAUSED (owner's choice): Transfers tab → Resume. It skips what's already copied.
+- Frontier file "27-Bonus Q and A Examples.mp4" (12.7 GB) kept failing with 409. The likely
+  cause is an orphaned second server (`next dev` on :3011) uploading it at the same time;
+  that server was killed on 2026-11-12. Confirm the 409s are gone after resuming. If they
+  persist, investigate the upload session (stale session / conflictBehavior).
 
 ## NEXT (top priority next session)
-- Package as an Electron desktop .app: own window, bundled Node server + native
-  better-sqlite3, background move engine. Removes the browser-tab/dev-server fragility.
+- Verify the untested queue paths live with a second real transfer: reorder, preemption
+  (moving an item above the running one), and remove (deletes the partial copy on the target).
+- Optional speed-up: overlap the next chunk's download with the current upload. Today each
+  chunk is downloaded, then uploaded, in turn, and a 12.7 GB file measured ~260 KB/s.
+- Optional: a higher-resolution background photo (public/background.jpg is only 740 px wide).
+- Still open from before: where moves run unattended. Lead with laptop overnight + caffeinate;
+  see the CLOUD-DEPLOY update.
 
 ## Deferred polish (from the UX specs; not blocking)
-- Treemap view, delta/incremental re-scan, offline/throttle banners, drag-to-reorder
+- Treemap view, delta/incremental re-scan, offline/throttle banners
   cards, global account switcher in the shell, file-detail popover.

@@ -108,7 +108,9 @@ meters, inline label/description), **lazy** explorer + analysis, settings, and
 personal accounts; resumable + auto-retry + cancellable + live tracker). Runs as `next dev`
 on 127.0.0.1. **2026-11-12 REDESIGN:** three-tab glass UI (Accounts / Transfers / Settings) and transfers as a
 priority queue with global pause, reorder (preempts), remove, add-from-Transfers — see the
-REDESIGN update. A second server on the same DB must set `ODM_TRANSFERS_WORKER=0`.
+REDESIGN update. A second server on the same DB must set `ODM_TRANSFERS_WORKER=0` (a stray
+`next dev` once double-ran a move). The Mac app (`mac/build-app.sh`) is now the runner; to ship
+changes, quit the app, rebuild, and reopen it. Open follow-ups are in `issues.txt` → NEXT.
 **Next: run unattended moves so they finish with the laptop closed.** The
 app side is done (auto-resume on boot); only the *where-does-it-run* host is open. As of
 2026-10-11 the **free-cloud path is exhausted** — Oracle is an unresolvable signup dead

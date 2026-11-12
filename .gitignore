@@ -29,6 +29,9 @@ next-env.d.ts
 # Testing
 /coverage
 
+# Detached dev-server logs (nohup)
+.next-dev.log
+
 # Misc / OS
 .DS_Store
 *.pem
@@ -37,3 +40,4 @@ yarn-debug.log*
 yarn-error.log*
 .idea
 .vscode
+.devserver.log
