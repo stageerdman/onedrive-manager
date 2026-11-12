@@ -54,12 +54,14 @@ const state = ((globalThis as { __odmMoveQueue?: ProcessMoveState }).__odmMoveQu
   stopping: new Map<string, StopReason>(),
   serverSideCap: new Map<string, boolean>(), // moveId -> does upload-from-URL work?
   live: new Map<string, LiveFile>(),
+  recheck: null,
 });
 type ProcessMoveState = {
   running: Set<string>;
   stopping: Map<string, StopReason>;
   serverSideCap: Map<string, boolean>;
   live: Map<string, LiveFile>;
+  recheck: ReturnType<typeof setTimeout> | null;
 };
 const { running, stopping, serverSideCap, live } = state;
 
@@ -293,11 +295,21 @@ export function schedule(): void {
     return;
   }
   if (!next) return;
-  // Never double-run a job another server process is driving.
+  // Never double-run a job another server process is driving. A heartbeat can also be
+  // left behind by a process that just died (e.g. app restart), so look again once it
+  // would have gone stale.
   const elsewhere = db
     .prepare(`SELECT 1 FROM moves WHERE heartbeat_at > ? AND status IN (${placeholders})`)
     .get(Date.now() - HEARTBEAT_STALE_MS, ...ACTIVE);
-  if (elsewhere) return;
+  if (elsewhere) {
+    if (!state.recheck) {
+      state.recheck = setTimeout(() => {
+        state.recheck = null;
+        schedule();
+      }, HEARTBEAT_STALE_MS + 1000);
+    }
+    return;
+  }
   launch(next.id);
 }
 
