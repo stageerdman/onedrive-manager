@@ -20,8 +20,8 @@ Stack: Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Microsoft Graph
 MSAL, deployed on Vercel.
 
 ## Secrets
-- `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` — one Azure app registration
-  (reused from RecBar, `AZURE_TENANT_ID=consumers`) used to connect all accounts. Run as a
+- `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` — one dedicated Azure app registration
+  "OneDrive Manager" (2026-11-12; formerly borrowed RecBar's, `AZURE_TENANT_ID=consumers`) used to connect all accounts. Run as a
   **confidential "Web" app**: Microsoft requires the client secret for the web-redirect code
   exchange (AADSTS70002 without it); the secret-less public-client path was unreliable for a
   personal-account web redirect. Auth is auth-code + PKCE + secret. Scopes: `Files.ReadWrite

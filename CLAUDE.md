@@ -89,8 +89,8 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
 ## Secrets (see `.env`, never committed)
-- `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` — one Azure app registration,
-  **reused from RecBar** (`obs-recording-shortcut`), `AZURE_TENANT_ID=consumers` (personal
+- `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` — one dedicated Azure app registration
+  "OneDrive Manager" (created 2026-11-12; replaced the borrowed RecBar one), `AZURE_TENANT_ID=consumers` (personal
   accounts). Run as a **confidential "Web" app**: Microsoft requires the client secret for the
   web-redirect code exchange (we also send PKCE). The secret-less public-client path returned
   AADSTS70002, so we use Web + secret. Scopes: `Files.ReadWrite offline_access`.
