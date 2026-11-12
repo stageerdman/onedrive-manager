@@ -5,6 +5,9 @@
 // server (`next start`) itself and stops it again on quit. Config (project dir, node path)
 // is baked into Info.plist by mac/build-app.sh;
 // the port comes from AZURE_REDIRECT_URI in .env.
+//
+// Closing the window keeps the app (and any transfer) running: it leaves the Dock and lives
+// in the menu bar. Click the menu-bar icon to reopen; right-click it to quit.
 
 import Cocoa
 import WebKit
@@ -17,19 +20,70 @@ let probeHosts = ["127.0.0.1", "[::1]"]
 
 enum PortState { case ours, foreign, free }
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var status: NSTextField!
     var server: Process?  // non-nil only if we started it
+    var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
         buildWindow()
+        buildStatusItem()
         Task { await start() }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }
+
+    // Dock icon / Finder re-open while the window is hidden.
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showWindow(nil); return false
+    }
+
+    // MARK: Menu-bar mode
+
+    func buildStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        guard let button = statusItem.button else { return }
+        let img = NSImage(systemSymbolName: "icloud", accessibilityDescription: "OneDrive Manager")
+        img?.isTemplate = true
+        button.image = img
+        button.toolTip = "OneDrive Manager"
+        button.target = self
+        button.action = #selector(statusItemClicked(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    @objc func statusItemClicked(_ sender: Any?) {
+        let e = NSApp.currentEvent
+        let isRight = e?.type == .rightMouseUp || e?.modifierFlags.contains(.control) == true
+        guard isRight else { return showWindow(nil) }
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Open OneDrive Manager", action: #selector(showWindow(_:)), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit OneDrive Manager", action: #selector(quitFromMenuBar(_:)), keyEquivalent: "q"))
+        menu.items.forEach { $0.target = self }
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)  // pops the menu
+        statusItem.menu = nil                 // so left-click keeps opening the window
+    }
+
+    @objc func showWindow(_ sender: Any?) {
+        NSApp.setActivationPolicy(.regular)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func quitFromMenuBar(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)  // so the "move in progress" alert is in front
+        NSApp.terminate(nil)
+    }
+
+    // Window closed → drop out of the Dock; server and transfers keep running.
+    func windowWillClose(_ note: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
 
     // MARK: Server lifecycle
 
@@ -113,7 +167,7 @@ enum PortState { case ours, foreign, free }
                 if busy {
                     let a = NSAlert()
                     a.messageText = "A move is in progress"
-                    a.informativeText = "Quitting pauses it. It resumes automatically next time you open OneDrive Manager."
+                    a.informativeText = "Quitting pauses it. It resumes automatically next time you open OneDrive Manager.\n\nTo keep it running in the background, just close the window instead."
                     a.addButton(withTitle: "Keep Running")
                     a.addButton(withTitle: "Quit Anyway")
                     if a.runModal() == .alertFirstButtonReturn { return app.reply(toApplicationShouldTerminate: false) }
@@ -144,6 +198,8 @@ enum PortState { case ours, foreign, free }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "OneDrive Manager"
+        window.isReleasedWhenClosed = false  // closing only hides it (menu-bar mode)
+        window.delegate = self
         window.minSize = NSSize(width: 720, height: 480)
         window.center()
         window.setFrameAutosaveName("MainWindow")

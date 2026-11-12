@@ -87,7 +87,8 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `lib/` — Graph client, OAuth/token handling, scan logic, persistence.
 - `mac/` — native macOS launcher (Swift + WKWebView). `mac/build-app.sh` runs `next build` and
   installs `~/Applications/OneDrive Manager.app`, which starts `next start` on :3417 (or reuses
-  a running instance) and stops it on quit. Re-run the script after code changes.
+  a running instance) and stops it on quit. Closing the window keeps it running as a menu-bar
+  icon (no Dock icon): click to reopen, right-click → Quit. Re-run the script after code changes.
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
 ## Secrets (see `.env`, never committed)
