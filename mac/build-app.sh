@@ -9,6 +9,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE="$(command -v node)"
 APP="$HOME/Applications/OneDrive Manager.app"
+# Port = the one in the registered OAuth redirect URI (single source of truth).
+PORT="$(grep -E '^AZURE_REDIRECT_URI=' "$ROOT/.env" | sed -E 's#.*://[^:/]+:([0-9]+).*#\1#')"
+[[ "$PORT" == <-> ]] || { echo "Couldn't read a port from AZURE_REDIRECT_URI in .env" >&2; exit 1; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -47,9 +50,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>ODMProjectDir</key><string>$ROOT</string>
+  <key>ODMPort</key><integer>$PORT</integer>
   <key>ODMNodePath</key><string>$NODE</string>
 </dict></plist>
 EOF
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 
-echo "✓ Built: $APP"
+echo "✓ Built: $APP (port $PORT)"

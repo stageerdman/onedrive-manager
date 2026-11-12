@@ -23,9 +23,17 @@ import { graphFetch, graphJson } from "@/lib/graph/client";
 const CHUNK = 327_680 * 20; // ~6 MiB, multiple of 320 KiB (upload-session requirement)
 const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
 
-const running = new Set<string>();
-const cancelled = new Set<string>();
-const serverSideCap = new Map<string, boolean>(); // moveId -> does upload-from-URL work?
+// Process-wide, not module-wide: in a production build, instrumentation.ts (which
+// auto-resumes moves on boot) and the route handlers get *separate* instances of this
+// module. Module-level sets would make a boot-resumed move invisible to the API — shown
+// as "paused", resumable a second time, and cancel would miss it.
+const state = ((globalThis as { __odmMoveState?: ProcessMoveState }).__odmMoveState ??= {
+  running: new Set<string>(),
+  cancelled: new Set<string>(),
+  serverSideCap: new Map<string, boolean>(), // moveId -> does upload-from-URL work?
+});
+type ProcessMoveState = { running: Set<string>; cancelled: Set<string>; serverSideCap: Map<string, boolean> };
+const { running, cancelled, serverSideCap } = state;
 
 class MoveCancelled extends Error {
   constructor() {

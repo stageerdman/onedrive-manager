@@ -1,17 +1,18 @@
 // OneDrive Manager — native macOS shell.
 //
 // A tiny AppKit + WKWebView wrapper around the Next.js app. On launch it reuses a server
-// already listening on :3000 (e.g. `npm run dev`), otherwise it starts the production
+// already listening on its port (e.g. `npm run dev`), otherwise it starts the production
 // server (`next start`) itself and stops it again on quit. Config (project dir, node path)
-// is baked into Info.plist by mac/build-app.sh.
+// is baked into Info.plist by mac/build-app.sh;
+// the port comes from AZURE_REDIRECT_URI in .env.
 
 import Cocoa
 import WebKit
 
-let port = 3000
+let port = Bundle.main.infoDictionary?["ODMPort"] as? Int ?? 3417
 let appURL = URL(string: "http://localhost:\(port)/")!  // must match AZURE_REDIRECT_URI's host
 let probeURL = URL(string: "http://127.0.0.1:\(port)/api/moves")!
-// `localhost` may resolve to IPv6 first, so a foreign server on [::1]:3000 would hijack the window.
+// `localhost` may resolve to IPv6 first, so a foreign server on [::1]:<port> would hijack the window.
 let probeHosts = ["127.0.0.1", "[::1]"]
 
 enum PortState { case ours, foreign, free }

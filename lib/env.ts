@@ -21,7 +21,7 @@ export const env = {
   azureClientSecret: process.env.AZURE_CLIENT_SECRET || "",
   // Registration is personal-accounts-only → "consumers".
   azureTenant: process.env.AZURE_TENANT_ID || "consumers",
-  azureRedirectUri: process.env.AZURE_REDIRECT_URI || "http://localhost:3000/api/auth/callback",
+  azureRedirectUri: process.env.AZURE_REDIRECT_URI || "http://localhost:3417/api/auth/callback",
   tokenEncryptionKey: required("TOKEN_ENCRYPTION_KEY"),
 };
 

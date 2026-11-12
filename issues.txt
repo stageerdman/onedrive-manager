@@ -4,6 +4,10 @@ Running list of open items and decisions-to-make. Newest context at the top of
 each section. See the INIT update in updates/ for the full build roadmap.
 
 ## Blocked on the user (credentials / external setup)
+- [ ] Add redirect URI `http://localhost:3417/api/auth/callback` (Web platform) to the Azure
+      registration. App moved off :3000 on 2026-11-12 (clashed with other local apps).
+      Existing accounts keep working (token refresh sends no redirect URI); only
+      Connect / Reconnect needs it. Keep the :3000 entry or remove it — harmless.
 - [x] Azure setup complete and VERIFIED: reused RecBar registration (bae96960-…,
       tenant=consumers). Run as a confidential "Web" app — redirect under the Web platform +
       a client secret in .env (AADSTS70002 ruled out the secret-less public-client path). All

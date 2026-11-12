@@ -84,7 +84,7 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 - `components/` — reusable shadcn/ui-based components (account card, space meter, item row, …).
 - `lib/` — Graph client, OAuth/token handling, scan logic, persistence.
 - `mac/` — native macOS launcher (Swift + WKWebView). `mac/build-app.sh` runs `next build` and
-  installs `~/Applications/OneDrive Manager.app`, which starts `next start` on :3000 (or reuses
+  installs `~/Applications/OneDrive Manager.app`, which starts `next start` on :3417 (or reuses
   a running instance) and stops it on quit. Re-run the script after code changes.
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
@@ -94,7 +94,7 @@ persist in a lightweight local/managed store — see the INIT update for the cho
   accounts). Run as a **confidential "Web" app**: Microsoft requires the client secret for the
   web-redirect code exchange (we also send PKCE). The secret-less public-client path returned
   AADSTS70002, so we use Web + secret. Scopes: `Files.ReadWrite offline_access`.
-- `AZURE_REDIRECT_URI` — OAuth "Web" redirect (`http://localhost:3000/api/auth/callback`).
+- `AZURE_REDIRECT_URI` — OAuth "Web" redirect (`http://localhost:3417/api/auth/callback`; port moved off 3000 on 2026-11-12 — 3000 clashed with other local apps. The app port is derived from this URI).
 - `TOKEN_ENCRYPTION_KEY` — encrypts stored OAuth refresh tokens at rest.
 - `AUTH_SECRET` — signs the app's own session/cookie.
 
