@@ -1,161 +1,130 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { ArrowRightLeft, Loader2, Check, AlertTriangle } from "lucide-react";
+import Link from "next/link";
+import { ArrowRightLeft, Check } from "lucide-react";
 import { formatBytes } from "@/lib/format";
-import type { MoveState } from "@/lib/graph/move";
+import { cn } from "@/lib/utils";
 
 export interface MoveTarget {
   id: string;
   label: string;
+  /** Free bytes, or null when unknown. */
+  free: number | null;
 }
 
 /**
- * Per-row cross-account move (spec: copy → verify → delete-source). Pick a target
- * drive, confirm the destructive step explicitly, then watch progress inline.
- * Nothing is deleted on the source until the copy is verified server-side.
+ * Hover-revealed "move to another account": pick a target, confirm, and the item is
+ * added to the Transfers queue (copy → verify → delete source happens there).
  */
 export function MoveMenu({
   sourceAccountId,
   itemId,
   itemName,
+  itemSize,
   targets,
 }: {
   sourceAccountId: string;
   itemId: string;
   itemName: string;
+  itemSize: number;
   targets: MoveTarget[];
 }) {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState<MoveTarget | null>(null);
-  const [move, setMove] = useState<MoveState | null>(null);
+  const [picked, setPicked] = useState<MoveTarget | null>(null);
+  const [state, setState] = useState<"idle" | "sending" | "added" | "error">("idle");
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-        setPending(null);
-      }
-    }
+    const close = () => {
+      setOpen(false);
+      setPicked(null);
+      triggerRef.current?.focus();
+    };
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
-
-  // Poll an in-flight move.
-  useEffect(() => {
-    const terminal = (s: string) => ["complete", "error", "cancelled", "paused"].includes(s);
-    if (!move || terminal(move.status)) return;
-    const timer = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/moves/${move.id}`, { cache: "no-store" });
-        const next: MoveState = await res.json();
-        setMove(next);
-        if (terminal(next.status)) {
-          clearInterval(timer);
-          if (next.status === "complete") router.refresh();
-        }
-      } catch {
-        /* transient */
-      }
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [move, router]);
-
-  async function cancelMove() {
-    if (!move) return;
-    await fetch(`/api/moves/${move.id}/cancel`, { method: "POST" });
-  }
-
-  async function begin(target: MoveTarget) {
-    const res = await fetch(`/api/accounts/${sourceAccountId}/move`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ itemId, targetAccountId: target.id }),
-    });
-    const state: MoveState = await res.json();
-    setOpen(false);
-    setPending(null);
-    setMove(state);
-  }
 
   if (targets.length === 0) return null;
 
-  // Active / finished move status pill.
-  if (move) {
-    if (move.status === "error") {
-      return (
-        <span className="inline-flex items-center gap-1 text-xs text-destructive" title={move.error ?? ""}>
-          <AlertTriangle className="size-3.5" aria-hidden /> Move failed
-        </span>
-      );
-    }
-    if (move.status === "complete") {
-      return (
-        <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-500">
-          <Check className="size-3.5" aria-hidden /> Moved
-        </span>
-      );
-    }
-    if (move.status === "cancelled") {
-      return <span className="text-xs text-muted-foreground">Cancelled</span>;
-    }
-    if (move.status === "paused") {
-      return <span className="text-xs text-amber-600 dark:text-amber-500">Paused — resume in the tracker ↓</span>;
-    }
-    const label =
-      move.status === "deleting" ? "Removing original…" : move.status === "verifying" ? "Verifying…" : "Copying…";
-    const pct = move.bytesTotal > 0 ? Math.round((move.bytesDone / move.bytesTotal) * 100) : 0;
+  if (state === "added") {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums">
-        <Loader2 className="size-3.5 animate-spin" aria-hidden /> {label}{" "}
-        {move.bytesTotal > 0 ? `${formatBytes(move.bytesDone)} (${pct}%)` : ""}
-        <button
-          type="button"
-          onClick={cancelMove}
-          className="rounded-md px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
-        >
-          Cancel
-        </button>
-      </span>
+      <Link href="/transfers" title="Added to Transfers" className="flex size-9 items-center justify-center text-sky-300">
+        <Check className="size-4" aria-hidden />
+        <span className="sr-only" aria-live="polite">Added to Transfers</span>
+      </Link>
     );
   }
+
+  async function add(target: MoveTarget) {
+    setState("sending");
+    try {
+      const res = await fetch("/api/moves", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceAccount: sourceAccountId, targetAccount: target.id, itemId }),
+      });
+      setState(res.ok ? "added" : "error");
+      if (res.ok) setOpen(false);
+    } catch {
+      setState("error");
+    }
+  }
+
+  const fits = picked ? picked.free == null || picked.free >= itemSize : true;
 
   return (
     <div ref={ref} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-        title="Move to another drive"
+        aria-label={`Move ${itemName} to another account`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        className={cn(
+          "flex size-9 items-center justify-center rounded-lg text-white/60 transition duration-150 hover:bg-white/10 hover:text-white",
+          "opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
+          open && "opacity-100",
+        )}
       >
-        <ArrowRightLeft className="size-3.5" aria-hidden />
+        <ArrowRightLeft className="size-4" aria-hidden />
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-10 mt-1 w-60 rounded-lg border bg-background p-1 shadow-md">
-          {pending ? (
-            <div className="p-2">
-              <p className="mb-2 text-xs text-muted-foreground">
-                Copy <span className="font-medium text-foreground">{itemName}</span> to{" "}
-                <span className="font-medium text-foreground">{pending.label}</span>, then delete it here?
-                The original is removed only after the copy is verified.
+        <div role="dialog" aria-label="Move to" className="glass-strong absolute right-0 top-full z-20 mt-1 w-64 rounded-xl p-2">
+          {picked ? (
+            <div className="flex flex-col gap-3 p-2">
+              <p className="text-[13px] text-white/60">
+                Move <span className="text-white/90">{itemName}</span> ({formatBytes(itemSize)}) to{" "}
+                <span className="text-white/90">{picked.label}</span>
               </p>
+              {!fits && <p className="text-[13px] text-amber-300">Not enough free space</p>}
+              {state === "error" && <p className="text-[13px] text-rose-400">Couldn&apos;t add it. Try again.</p>}
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => begin(pending)}
-                  className="flex-1 rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                  autoFocus
+                  disabled={!fits || state === "sending"}
+                  onClick={() => add(picked)}
+                  className="flex-1 rounded-full bg-sky-300 px-3 py-1.5 text-[13px] font-medium text-neutral-950 hover:bg-sky-200 disabled:opacity-40"
                 >
-                  Move
+                  Add to Transfers
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPending(null)}
-                  className="rounded-md border px-2 py-1 text-xs hover:bg-muted"
+                  onClick={() => setPicked(null)}
+                  className="rounded-full px-3 py-1.5 text-[13px] text-white/60 hover:bg-white/10 hover:text-white"
                 >
                   Cancel
                 </button>
@@ -163,15 +132,19 @@ export function MoveMenu({
             </div>
           ) : (
             <>
-              <p className="px-2 py-1 text-xs text-muted-foreground">Move to…</p>
-              {targets.map((t) => (
+              <p className="px-2 pb-1 pt-1 text-[13px] text-white/50">Move to</p>
+              {targets.map((t, i) => (
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => setPending(t)}
-                  className="block w-full truncate rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                  autoFocus={i === 0}
+                  onClick={() => setPicked(t)}
+                  className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-[15px] hover:bg-white/10"
                 >
-                  {t.label}
+                  <span className="truncate">{t.label}</span>
+                  {t.free != null && (
+                    <span className="shrink-0 text-[13px] text-white/50 tabular-nums">{formatBytes(t.free)} free</span>
+                  )}
                 </button>
               ))}
             </>

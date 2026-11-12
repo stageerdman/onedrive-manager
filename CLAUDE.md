@@ -81,7 +81,9 @@ persist in a lightweight local/managed store — see the INIT update for the cho
 
 ## Layout (once scaffolded)
 - `app/` — App Router routes (overview, account detail, auth callback, API routes).
-- `components/` — reusable shadcn/ui-based components (account card, space meter, item row, …).
+- `components/` — reusable components (nav tabs, account card, space meter, explorer item row,
+  transfers hero/queue/add dialog). Dark-only glass UI: `glass` / `glass-strong` utilities in
+  `app/globals.css`, background photo `public/background.jpg`, logo `app/icon.png`.
 - `lib/` — Graph client, OAuth/token handling, scan logic, persistence.
 - `mac/` — native macOS launcher (Swift + WKWebView). `mac/build-app.sh` runs `next build` and
   installs `~/Applications/OneDrive Manager.app`, which starts `next start` on :3417 (or reuses
@@ -104,7 +106,10 @@ Created under AI Control 2026-10-06. INIT roadmap + handoff in `updates/`.
 meters, inline label/description), **lazy** explorer + analysis, settings, and
 **cross-account move** (streams through the host — no server-side path exists for separate
 personal accounts; resumable + auto-retry + cancellable + live tracker). Runs as `next dev`
-on 127.0.0.1. **Next: run unattended moves so they finish with the laptop closed.** The
+on 127.0.0.1. **2026-11-12 REDESIGN:** three-tab glass UI (Accounts / Transfers / Settings) and transfers as a
+priority queue with global pause, reorder (preempts), remove, add-from-Transfers — see the
+REDESIGN update. A second server on the same DB must set `ODM_TRANSFERS_WORKER=0`.
+**Next: run unattended moves so they finish with the laptop closed.** The
 app side is done (auto-resume on boot); only the *where-does-it-run* host is open. As of
 2026-10-11 the **free-cloud path is exhausted** — Oracle is an unresolvable signup dead
 end, GCP always-free has 1 GB egress, Chinese/Russian clouds are trial-credit and/or

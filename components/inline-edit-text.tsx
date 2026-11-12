@@ -81,7 +81,7 @@ export function InlineEditText({
         onKeyDown={onKeyDown}
         placeholder={placeholder}
         className={cn(
-          "w-full rounded-md border bg-background px-1.5 py-0.5 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "w-full rounded-md border border-white/15 bg-white/10 px-1.5 py-0.5 outline-none",
           editClassName ?? className,
         )}
       />
@@ -94,8 +94,8 @@ export function InlineEditText({
       type="button"
       onClick={begin}
       className={cn(
-        "group/inline inline-flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-left hover:bg-muted/60",
-        isEmpty && "text-muted-foreground italic",
+        "group/inline inline-flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-left hover:bg-white/10",
+        isEmpty && "text-white/50 italic",
         className,
       )}
       title="Click to edit"

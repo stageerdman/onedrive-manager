@@ -23,7 +23,7 @@ swiftc -O "$ROOT/mac/OneDriveManager.swift" -o "$TMP/OneDriveManager"
 
 echo "→ icon"
 mkdir -p "$TMP/icon.iconset"
-sips -s format png "$ROOT/app/favicon.ico" --out "$TMP/base.png" >/dev/null
+cp "$ROOT/app/icon.png" "$TMP/base.png" >/dev/null
 for s in 16 32 128 256 512; do
   sips -z $s $s "$TMP/base.png" --out "$TMP/icon.iconset/icon_${s}x${s}.png" >/dev/null
   sips -z $((s*2)) $((s*2)) "$TMP/base.png" --out "$TMP/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null

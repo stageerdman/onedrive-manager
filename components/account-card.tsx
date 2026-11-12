@@ -1,100 +1,90 @@
 import Link from "next/link";
-import { ArrowRight } from "lucide-react";
-import type { Account, Accent } from "@/lib/accounts";
+import type { Account } from "@/lib/accounts";
 import type { DriveQuota } from "@/lib/graph/drive";
-import { formatBytes } from "@/lib/format";
+import { daysUntil, formatBytes, formatDayMonth } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { Card } from "@/components/ui/card";
-import { buttonVariants } from "@/components/ui/button";
-import { FullnessMeter } from "@/components/fullness-meter";
-import { InlineEditText } from "@/components/inline-edit-text";
+import { SpaceMeter } from "@/components/space-meter";
 
-const ACCENT_DOT: Record<Accent, string> = {
-  indigo: "bg-indigo-500",
-  teal: "bg-teal-500",
-  rose: "bg-rose-500",
-};
+const NEARLY_FULL = 0.9;
+const ENDING_SOON_DAYS = 14;
 
 /**
- * One account on the overview (spec #1 §3). Identity on top (accent dot +
- * editable label, editable description, muted email), the fullness meter as the
- * hero visual, free-GB as the hero number, then used/total, then footer.
- * Reconnect state keeps identity visible and swaps the number for a Reconnect CTA.
+ * One account on the home screen: name, free space (the hero), meter, usage, and when
+ * access lapses. The whole card opens the account — except when access has expired,
+ * where Reconnect is its only action.
  */
 export function AccountCard({
   account,
   quota,
-  needsReconnect,
+  expired,
 }: {
   account: Account;
   quota: DriveQuota | null;
-  needsReconnect: boolean;
+  expired: boolean;
 }) {
-  return (
-    <Card className={cn("flex flex-col gap-3 p-6", needsReconnect && "opacity-90")}>
-      {/* Identity */}
-      <div className="flex items-start gap-2">
-        <span className={cn("mt-1.5 size-2.5 shrink-0 rounded-full", ACCENT_DOT[account.accent])} aria-hidden />
-        <div className="min-w-0 flex-1">
-          <InlineEditText
-            accountId={account.id}
-            field="label"
-            value={account.label}
-            placeholder="Name this drive"
-            className="text-base font-semibold tracking-tight"
-          />
-          <InlineEditText
-            accountId={account.id}
-            field="description"
-            value={account.description}
-            placeholder="Add a description"
-            className="text-sm text-muted-foreground"
-          />
-          {account.email && (
-            <p className="truncate px-1.5 text-xs text-muted-foreground/70">{account.email}</p>
-          )}
-        </div>
-      </div>
+  const full = !!quota && quota.fraction > NEARLY_FULL;
+  const daysLeft = daysUntil(account.accessExpiresAt);
 
-      {/* Hero: meter + free number, or reconnect */}
-      {needsReconnect || !quota ? (
-        <div className="flex flex-col gap-2 py-1">
-          <FullnessMeter fraction={0} className="opacity-40" />
-          <p className="text-sm text-amber-600 dark:text-amber-500">Access expired — reconnect to refresh.</p>
-          <a
-            href={`/api/auth/login?reconnect=${account.id}`}
-            className={cn(buttonVariants({ size: "sm", variant: "outline" }), "self-start")}
+  return (
+    <div
+      className={cn(
+        "glass relative flex min-h-[220px] flex-col rounded-2xl p-6 transition duration-150 ease-out",
+        !expired && "hover:-translate-y-px hover:border-white/15 hover:bg-white/[0.09]",
+      )}
+    >
+      <div className={cn("flex flex-col", expired && "opacity-50")}>
+        {expired ? (
+          <h2 className="truncate text-xl font-semibold">{account.label}</h2>
+        ) : (
+          <Link
+            href={`/account/${account.id}`}
+            className="truncate rounded-md text-xl font-semibold after:absolute after:inset-0 after:rounded-2xl focus-visible:outline-none"
           >
-            Reconnect
-          </a>
-        </div>
-      ) : (
-        <>
-          <FullnessMeter fraction={quota.fraction} />
-          <div>
-            <p className="text-2xl font-semibold tracking-tight tabular-nums">
-              {formatBytes(quota.remaining)} free
+            {account.label}
+          </Link>
+        )}
+
+        {quota ? (
+          <>
+            <p className="mt-3 flex items-baseline gap-2">
+              <span
+                className={cn("text-[32px] font-semibold leading-none tracking-tight tabular-nums", full && "text-amber-300")}
+              >
+                {formatBytes(quota.remaining)}
+              </span>
+              <span className="text-[15px] text-white/60">free</span>
             </p>
-            <p className="text-sm text-muted-foreground tabular-nums">
+            <div className="mt-4">
+              <SpaceMeter used={quota.used} total={quota.total} warn={full} />
+            </div>
+            <p className="mt-2 text-[13px] text-white/60 tabular-nums">
               {formatBytes(quota.used)} of {formatBytes(quota.total)} used
             </p>
-          </div>
-        </>
-      )}
-
-      {/* Footer */}
-      <div className="mt-1 flex items-center justify-between border-t pt-3">
-        <span className="text-xs text-muted-foreground">
-          {needsReconnect ? "Reconnect needed" : "Connected"}
-        </span>
-        <Link
-          href={`/account/${account.id}`}
-          className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
-        >
-          Explore
-          <ArrowRight className="size-4" aria-hidden />
-        </Link>
+          </>
+        ) : (
+          !expired && <p className="mt-3 text-[15px] text-white/60">Couldn&apos;t load space right now.</p>
+        )}
       </div>
-    </Card>
+
+      <div className="mt-auto flex items-center justify-between gap-3 pt-6 text-[13px]">
+        {expired ? (
+          <>
+            <span className="text-rose-400">Access expired</span>
+            <a
+              href={`/api/auth/login?reconnect=${account.id}`}
+              className="relative z-10 rounded-full bg-sky-300 px-4 py-1.5 font-medium text-neutral-950 transition-colors hover:bg-sky-200"
+            >
+              Reconnect
+            </a>
+          </>
+        ) : daysLeft < ENDING_SOON_DAYS ? (
+          <span className="text-amber-300">
+            Access ends in {daysLeft} {daysLeft === 1 ? "day" : "days"} · open to renew
+          </span>
+        ) : (
+          <span className="text-white/50">Access until {formatDayMonth(account.accessExpiresAt)}</span>
+        )}
+      </div>
+    </div>
   );
 }
