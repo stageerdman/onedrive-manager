@@ -70,7 +70,15 @@ export function TransferHero({
         <Node icon={Cloud} title={label(move.targetAccount)} figure={formatBytes(move.bytesDone)} caption="copied so far" />
       </div>
 
-      {cur && move.isRunning && <CurrentFile file={cur} source={label(move.sourceAccount)} target={label(move.targetAccount)} />}
+      {cur && move.isRunning ? (
+        <CurrentFile file={cur} source={label(move.sourceAccount)} target={label(move.targetAccount)} />
+      ) : (
+        move.isRunning &&
+        !queuePaused &&
+        move.status === "copying" && (
+          <p className="text-sm text-white/50">Checking which files are already on {label(move.targetAccount)}…</p>
+        )
+      )}
 
       {retrying && (
         <p className="flex items-start gap-2 rounded-lg bg-amber-300/10 px-3 py-2 text-xs text-amber-300">

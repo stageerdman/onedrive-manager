@@ -326,11 +326,11 @@ function launch(id: string): void {
 /**
  * Progress never goes backwards: each (re)run re-walks the tree from zero, counting
  * files already on the target as it skips them, so the stored high-water mark stays
- * truthful while the walk catches up.
+ * truthful while the walk catches up. Any progress also clears a stale retry notice.
  */
 function setProgress(id: string, filesDone: number, bytesDone: number) {
   db.prepare(
-    "UPDATE moves SET files_done = MAX(files_done, ?), bytes_done = MAX(bytes_done, ?) WHERE id = ?",
+    "UPDATE moves SET files_done = MAX(files_done, ?), bytes_done = MAX(bytes_done, ?), error = NULL WHERE id = ?",
   ).run(filesDone, bytesDone, id);
 }
 function newItemId(id: string): string | null {
@@ -348,7 +348,7 @@ async function runMove(
   input: { sourceAccount: string; targetAccount: string; itemId: string },
 ): Promise<void> {
   const MAX_ATTEMPTS = 25;
-  db.prepare("UPDATE moves SET status = 'copying', finished_at = NULL WHERE id = ? AND status <> 'deleting'").run(id);
+  db.prepare("UPDATE moves SET status = 'copying', error = NULL, finished_at = NULL WHERE id = ? AND status <> 'deleting'").run(id);
 
   for (let attempt = 1; ; attempt++) {
     try {
