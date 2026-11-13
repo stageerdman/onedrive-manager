@@ -89,6 +89,9 @@ persist in a lightweight local/managed store — see the INIT update for the cho
   installs `~/Applications/OneDrive Manager.app`, which starts `next start` on :3417 (or reuses
   a running instance) and stops it on quit. Closing the window keeps it running as a menu-bar
   icon (no Dock icon): click to reopen, right-click → Quit. Re-run the script after code changes.
+- **Logs** — `data/logs/app.log` (JSONL, append-only, rotates at 20 MB; `lib/log.ts`). The
+  first place to look when debugging transfers: `grep '<file name>' data/logs/app.log`.
+  `~/Library/Logs/OneDriveManager.log` is the Mac app's stdout and is wiped on every launch.
 - `updates/` — AI Control update history. The build roadmap lives in the INIT update.
 
 ## Secrets (see `.env`, never committed)

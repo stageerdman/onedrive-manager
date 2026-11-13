@@ -122,6 +122,9 @@ function evolve(db: Database.Database): void {
   // don't share memory, so "remove" requests and live per-file progress go via the DB.
   addColumn("moves", "control", "control TEXT");
   addColumn("moves", "live_json", "live_json TEXT");
+  // The large file's open upload session ({key, uploadUrl}) so a retry, pause or app
+  // restart resumes mid-file at the byte the target already has, instead of from zero.
+  addColumn("moves", "upload_json", "upload_json TEXT");
   // When Microsoft last issued this account a refresh token (drives "access until").
   addColumn("accounts", "token_refreshed_at", "token_refreshed_at TEXT");
   db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { db, getSetting, setSetting } from "@/lib/db";
 import { graphFetch, graphJson } from "@/lib/graph/client";
+import { log } from "@/lib/log";
 
 /**
  * Cross-account transfers: copy → verify → delete-source (Graph has no native move
@@ -373,7 +374,7 @@ function launch(id: string): void {
   beat();
   const timer = setInterval(beat, HEARTBEAT_MS);
   void runMove(id, { sourceAccount: row.source_account, targetAccount: row.target_account, itemId: row.item_id })
-    .catch((e) => console.error("[move] runner crashed", e))
+    .catch((e) => log("error", "move", "runner-crashed", { moveId: id, error: e, stack: e instanceof Error ? e.stack : undefined }))
     .finally(() => {
       clearInterval(timer);
       db.prepare("UPDATE moves SET heartbeat_at = NULL, live_json = NULL WHERE id = ?").run(id);
@@ -413,13 +414,24 @@ async function runMove(
   const MAX_ATTEMPTS = 25;
   db.prepare("UPDATE moves SET status = 'copying', error = NULL, finished_at = NULL WHERE id = ? AND status <> 'deleting'").run(id);
 
+  log("info", "move", "run-start", { moveId: id, ...input });
   for (let attempt = 1; ; attempt++) {
     try {
       await attemptMove(id, input);
+      log("info", "move", "run-complete", { moveId: id, attempt });
       return; // success
     } catch (err) {
       if (err instanceof MoveStopped) return onStopped(id, input.targetAccount, err.reason);
       const message = err instanceof Error ? err.message : "Transfer failed.";
+      const file = live.get(id);
+      log(attempt >= MAX_ATTEMPTS ? "error" : "warn", "move", "attempt-failed", {
+        moveId: id,
+        attempt,
+        error: message,
+        file: file?.name,
+        uploaded: file?.uploaded,
+        size: file?.size,
+      });
       if (attempt >= MAX_ATTEMPTS) {
         db.prepare(
           "UPDATE moves SET status = 'stalled', error = ?, finished_at = datetime('now') WHERE id = ?",
@@ -443,12 +455,14 @@ async function runMove(
 }
 
 async function onStopped(id: string, targetAccount: string, reason: StopReason): Promise<void> {
+  log("info", "move", "stopped", { moveId: id, reason, file: live.get(id)?.name, uploaded: live.get(id)?.uploaded });
   if (reason === "pause") {
     // Paused or preempted: back in the queue, partial copy kept for the next run.
     db.prepare("UPDATE moves SET status = 'queued', error = NULL WHERE id = ?").run(id);
     return;
   }
   db.prepare("UPDATE moves SET status = 'cancelled' WHERE id = ?").run(id);
+  saveUpload(id, null);
   await deletePartialCopy(id, targetAccount);
   db.prepare("DELETE FROM moves WHERE id = ?").run(id);
 }
@@ -499,6 +513,7 @@ async function attemptMove(
         db.prepare("UPDATE moves SET new_item_id = ? WHERE id = ?").run(destId, id);
       }
       await copyFolder(sourceAccount, targetAccount, itemId, destId, id, progress);
+      log("info", "move", "pass-copied", { moveId: id, files: progress.files, bytes: progress.bytes });
     } else {
       // Single file. Skip if already present with matching size.
       const existing = await findChild(targetAccount, targetRoot.id, name);
@@ -653,13 +668,13 @@ async function copyFile(
       const result = await uploadFromUrl(targetAccount, targetParentId, name, downloadUrl, size, moveId, progress);
       if (serverSideCap.get(moveId) !== true) {
         serverSideCap.set(moveId, true);
-        console.log(`[move] server-to-server works for this move`);
+        log("info", "move", "server-side-works", { moveId });
       }
       return result;
     } catch (e) {
       serverSideCap.set(moveId, false);
       liveUpdate(moveId, { serverSide: false, downloaded: 0, uploaded: 0 });
-      console.log(`[move] server-to-server unavailable (${e instanceof Error ? e.message : e}) — streaming through this machine from here on`);
+      log("info", "move", "server-side-unavailable", { moveId, error: e });
     }
   }
 
@@ -680,7 +695,19 @@ async function copyFile(
     onProgress(size);
     return (await res.json()) as DriveItem;
   }
-  return streamLargeFile(targetAccount, targetParentId, encoded, name, size, downloadUrl, onProgress, moveId);
+  const openDownload = async (offset: number, signal: AbortSignal): Promise<Response> => {
+    // Fresh pre-authenticated URL per (re)open — they expire.
+    const url = await getDownloadUrl(sourceAccount, item.id, name);
+    const res = await fetch(url, { signal, headers: offset > 0 ? { Range: `bytes=${offset}-` } : {} });
+    if (offset > 0 && res.status !== 206) throw new Error(`Source ignored the resume range (${res.status}).`);
+    if (!res.ok || !res.body) throw new Error(`Download of "${name}" failed (${res.status}).`);
+    return res;
+  };
+  const started = Date.now();
+  log("info", "move", "file-start", { moveId, name, size });
+  const result = await streamLargeFile(targetAccount, targetParentId, encoded, name, size, openDownload, onProgress, moveId);
+  log("info", "move", "file-done", { moveId, name, size, secs: Math.round((Date.now() - started) / 1000) });
+  return result;
 }
 
 async function uploadFromUrl(
@@ -743,77 +770,221 @@ async function uploadFromUrl(
   throw new Error(`Upload-from-URL for "${name}" timed out.`);
 }
 
+// --- Large-file streaming: stall-proof and resumable mid-file -------------------------
+
+const STALL_MS = 60_000; // no bytes from the source for this long → reconnect
+const CHUNK_TIMEOUT_MS = 3 * 60_000; // one ~6 MiB chunk PUT
+const MAX_REOPENS_WITHOUT_PROGRESS = 8;
+const LOG_EVERY_MS = 60_000;
+
+class StallError extends Error {
+  constructor(what: string) {
+    super(`${what} stalled (no data for ${STALL_MS / 1000}s)`);
+    this.name = "StallError";
+  }
+}
+/** A chunk rejection retrying can't fix (e.g. the upload session is gone). */
+class ChunkFatal extends Error {}
+
+interface SavedUpload {
+  key: string;
+  uploadUrl: string;
+}
+function loadUpload(moveId: string): SavedUpload | null {
+  const r = db.prepare("SELECT upload_json FROM moves WHERE id = ?").get(moveId) as { upload_json: string | null } | undefined;
+  return r?.upload_json ? (JSON.parse(r.upload_json) as SavedUpload) : null;
+}
+function saveUpload(moveId: string, u: SavedUpload | null): void {
+  db.prepare("UPDATE moves SET upload_json = ? WHERE id = ?").run(u ? JSON.stringify(u) : null, moveId);
+}
+
+/** How many bytes an upload session already holds, or null if the session is gone. */
+async function sessionOffset(uploadUrl: string): Promise<number | null> {
+  try {
+    const res = await fetch(uploadUrl, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { nextExpectedRanges?: string[] };
+    const first = body.nextExpectedRanges?.[0];
+    return first ? Number(first.split("-")[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StallError("Download")), STALL_MS);
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function putChunk(uploadUrl: string, chunk: Buffer, start: number, size: number, name: string): Promise<DriveItem | null> {
+  const end = start + chunk.length - 1;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const res = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Length": String(chunk.length), "Content-Range": `bytes ${start}-${end}/${size}` },
+        body: new Uint8Array(chunk),
+        signal: AbortSignal.timeout(CHUNK_TIMEOUT_MS),
+      });
+      if (res.status === 200 || res.status === 201) return (await res.json()) as DriveItem;
+      if (res.status === 202) return null;
+      const text = (await res.text().catch(() => "")).slice(0, 300);
+      if (res.status === 409 || res.status === 416) {
+        // Often an earlier try of this same chunk did land (response lost) — check.
+        const have = await sessionOffset(uploadUrl);
+        log("warn", "move", "chunk-conflict", { name, status: res.status, start, have, body: text });
+        if (have != null && have >= end + 1) return null;
+        throw new ChunkFatal(`Chunk upload for "${name}" rejected (${res.status}) at ${start}.`);
+      }
+      if (res.status !== 429 && res.status < 500) {
+        log("error", "move", "chunk-rejected", { name, status: res.status, start, body: text });
+        throw new ChunkFatal(`Chunk upload for "${name}" failed (${res.status}).`);
+      }
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      if (e instanceof ChunkFatal) throw e;
+      lastErr = e;
+    }
+    log("warn", "move", "chunk-retry", { name, start, attempt: attempt + 1, error: lastErr });
+    await sleep(Math.min(2 ** attempt, 30) * 1000);
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("Chunk upload failed");
+}
+
+/**
+ * Stream one large file source → target through an upload session.
+ *
+ * - The session URL is saved on the move row; a retry / pause / restart asks it how many
+ *   bytes it holds and continues from there (download re-opened with a Range header).
+ * - A download that goes quiet for STALL_MS is aborted and re-opened at the current
+ *   offset (with a fresh download URL) — the bytes already uploaded are kept.
+ */
 async function streamLargeFile(
   targetAccount: string,
   targetParentId: string,
   encodedName: string,
   name: string,
   size: number,
-  downloadUrl: string,
-  onProgress?: (uploaded: number) => void,
-  moveId?: string,
+  openDownload: (offset: number, signal: AbortSignal) => Promise<Response>,
+  onProgress: (uploaded: number) => void,
+  moveId: string,
 ): Promise<DriveItem> {
-  const session = await graphJson<{ uploadUrl: string }>(
-    targetAccount,
-    `/me/drive/items/${targetParentId}:/${encodedName}:/createUploadSession`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ item: { "@microsoft.graph.conflictBehavior": "replace" } }),
-    },
-  );
-  const uploadUrl = session.uploadUrl;
-  const src = await resilientFetch(downloadUrl);
-  if (!src.ok || !src.body) throw new Error(`Download of "${name}" failed (${src.status}).`);
-  const reader = src.body.getReader();
-
+  const key = `${targetParentId}/${name}/${size}`;
+  let uploadUrl: string | null = null;
   let offset = 0;
-  let carry = Buffer.alloc(0);
-  let done = false;
+
+  const saved = loadUpload(moveId);
+  if (saved?.key === key) {
+    const have = await sessionOffset(saved.uploadUrl);
+    if (have != null) {
+      uploadUrl = saved.uploadUrl;
+      offset = have;
+      log("info", "move", "session-resumed", { name, offset, size });
+    } else {
+      log("warn", "move", "session-expired", { name });
+    }
+  }
+  if (!uploadUrl) {
+    const session = await graphJson<{ uploadUrl: string }>(
+      targetAccount,
+      `/me/drive/items/${targetParentId}:/${encodedName}:/createUploadSession`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item: { "@microsoft.graph.conflictBehavior": "replace" } }),
+      },
+    );
+    uploadUrl = session.uploadUrl;
+    saveUpload(moveId, { key, uploadUrl });
+    log("info", "move", "session-created", { name, size });
+  }
+
+  liveUpdate(moveId, { downloaded: offset, uploaded: offset });
+  onProgress(offset);
+
   let lastItem: DriveItem | null = null;
+  let fruitless = 0; // re-opens in a row that moved nothing
+  let lastLog = Date.now();
+  let lastLogOffset = offset;
 
-  async function put(chunk: Buffer, start: number): Promise<void> {
-    const end = start + chunk.length - 1;
-    for (let attempt = 0; attempt < 6; attempt++) {
+  while (!lastItem) {
+    throwIfStopped(moveId);
+    const openedAt = offset;
+    const ctrl = new AbortController();
+    try {
+      const headerTimer = setTimeout(() => ctrl.abort(new StallError("Download start")), STALL_MS);
+      let src: Response;
       try {
-        const res = await fetch(uploadUrl, {
-          method: "PUT",
-          headers: { "Content-Length": String(chunk.length), "Content-Range": `bytes ${start}-${end}/${size}` },
-          body: new Uint8Array(chunk),
-        });
-        if (res.status === 200 || res.status === 201) {
-          lastItem = (await res.json()) as DriveItem;
-          return;
-        }
-        if (res.status === 202) return;
-        if (res.status !== 429 && res.status < 500) {
-          throw new Error(`Chunk upload for "${name}" failed (${res.status}).`);
-        }
-      } catch (e) {
-        if (attempt === 5) throw e;
+        src = await openDownload(offset, ctrl.signal);
+      } finally {
+        clearTimeout(headerTimer);
       }
-      await sleep(Math.min(2 ** attempt, 30) * 1000);
+      const reader = src.body!.getReader();
+      let carry = Buffer.alloc(0);
+      let downloaded = offset;
+      for (;;) {
+        throwIfStopped(moveId);
+        const { value, done } = await readWithTimeout(reader);
+        if (value) {
+          carry = Buffer.concat([carry, Buffer.from(value)]);
+          downloaded += value.length;
+          liveUpdate(moveId, { downloaded });
+        }
+        while (carry.length >= CHUNK || (done && carry.length > 0)) {
+          throwIfStopped(moveId);
+          const piece = carry.subarray(0, Math.min(CHUNK, carry.length));
+          const item = await putChunk(uploadUrl, Buffer.from(piece), offset, size, name);
+          offset += piece.length;
+          carry = carry.subarray(piece.length);
+          if (item) lastItem = item;
+          liveUpdate(moveId, { uploaded: offset });
+          onProgress(offset);
+          if (Date.now() - lastLog >= LOG_EVERY_MS) {
+            const mbps = (offset - lastLogOffset) / 1e6 / ((Date.now() - lastLog) / 1000);
+            log("info", "move", "progress", { name, offset, size, pct: +((offset / size) * 100).toFixed(1), mbps: +mbps.toFixed(2) });
+            lastLog = Date.now();
+            lastLogOffset = offset;
+          }
+        }
+        if (done) break;
+      }
+      if (!lastItem) {
+        if (offset >= size) throw new ChunkFatal(`Upload of "${name}" sent every byte but never completed.`);
+        throw new Error(`Download ended early at ${offset}/${size}`);
+      }
+    } catch (e) {
+      if (e instanceof MoveStopped) throw e;
+      if (e instanceof ChunkFatal) {
+        saveUpload(moveId, null); // next attempt starts a fresh session
+        throw e;
+      }
+      // Network drop / stall / early end: re-open the download where the target is.
+      fruitless = offset > openedAt ? 0 : fruitless + 1;
+      log("warn", "move", "download-reopen", { name, offset, size, fruitless, error: e });
+      if (fruitless > MAX_REOPENS_WITHOUT_PROGRESS) {
+        throw new Error(`Download of "${name}" keeps failing at ${offset}/${size}: ${e instanceof Error ? e.message : e}`);
+      }
+      const have = await sessionOffset(uploadUrl);
+      if (have == null) {
+        saveUpload(moveId, null);
+        throw new Error(`Upload session for "${name}" was lost at ${offset}/${size}.`);
+      }
+      offset = have;
+      await sleepUnlessStopped(moveId, Math.min(2 ** fruitless, 30) * 1000);
+    } finally {
+      ctrl.abort();
     }
   }
-
-  while (!done) {
-    if (moveId) throwIfStopped(moveId); // allow cancelling mid-file
-    const { value, done: d } = await reader.read();
-    if (value) {
-      carry = Buffer.concat([carry, Buffer.from(value)]);
-      liveUpdate(moveId, { downloaded: (live.get(moveId ?? "")?.downloaded ?? 0) + value.length });
-    }
-    done = d;
-    while (carry.length >= CHUNK) {
-      if (moveId) throwIfStopped(moveId);
-      await put(Buffer.from(carry.subarray(0, CHUNK)), offset);
-      offset += CHUNK;
-      carry = carry.subarray(CHUNK);
-      liveUpdate(moveId, { uploaded: offset });
-      onProgress?.(offset); // live within-file progress
-    }
-  }
-  if (carry.length > 0 || offset < size) await put(carry, offset);
-  if (!lastItem) throw new Error(`Upload of "${name}" did not complete.`);
+  saveUpload(moveId, null);
   return lastItem;
 }

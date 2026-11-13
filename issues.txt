@@ -50,6 +50,11 @@ each section. See the INIT update in updates/ for the full build roadmap.
 ## In progress (resume anytime) — as of 2026-11-12
 - "Jeremy Miner" move (Stage Erdman → Soren Osha, ~65 GB) at ~37 GB / 52%. The queue is
   PAUSED (owner's choice): Transfers tab → Resume. It skips what's already copied.
+- 2026-11-13: the real cause of the 27-Bonus failures was a download stream that stalled with
+  no timeout (hung forever at 5.4 MB), and every retry restarted the 12.7 GB file from byte 0.
+  Fixed: 60s stall watchdog + re-open with Range, upload session saved in moves.upload_json
+  so retries/pauses/restarts resume mid-file, chunk PUT timeouts, persistent log
+  data/logs/app.log. Watch the log to confirm the file completes.
 - Frontier file "27-Bonus Q and A Examples.mp4" (12.7 GB) kept failing with 409. The likely
   cause is an orphaned second server (`next dev` on :3011) uploading it at the same time;
   that server was killed on 2026-11-12. Confirm the 409s are gone after resuming. If they
