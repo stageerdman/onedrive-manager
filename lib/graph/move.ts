@@ -431,16 +431,17 @@ async function runMove(
       if (err instanceof MoveStopped) return onStopped(id, input.targetAccount, err.reason);
       const message = err instanceof Error ? err.message : "Transfer failed.";
       const file = live.get(id);
-      if (err instanceof TargetRefusing) {
-        // Microsoft is refusing uploads to the target for now. Waiting doesn't use up the
-        // retry budget — these spells have lasted 15–60 min — up to REFUSING_MAX_MS.
+      if (err instanceof TargetRefusing || err instanceof SourceRefusing) {
+        // Microsoft is refusing uploads to the target / downloads from the source for now.
+        // Waiting doesn't use up the retry budget — spells have lasted 5–60 min — up to
+        // REFUSING_MAX_MS. The saved upload session (and the spool) keep the progress.
         refusingSince ??= Date.now();
         const waitedMs = Date.now() - refusingSince;
         log("warn", "move", "target-refusing", { moveId: id, file: file?.name, waitedMins: Math.round(waitedMs / 60_000), error: message });
         if (waitedMs < REFUSING_MAX_MS) {
           attempt--;
           db.prepare("UPDATE moves SET error = ? WHERE id = ?").run(
-            `${message} Microsoft is refusing uploads to this account for now — retrying every ${REFUSING_RETRY_MS / 60_000} min…`,
+            `${message} Waiting for Microsoft — retrying every ${REFUSING_RETRY_MS / 60_000} min, progress is kept…`,
             id,
           );
           liveClear(id);
@@ -700,6 +701,7 @@ async function copyFile(
     // Generous but finite: assume at least ~100 KB/s, never less than 2 minutes.
     const timeoutMs = Math.max(120_000, size / 100);
     const src = await resilientFetch(downloadUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    if (src.status === 401) throw new SourceRefusing(`Download of "${name}" is being refused by Microsoft (401).`);
     if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
     const buf = new Uint8Array(await src.arrayBuffer());
     liveUpdate(moveId, { downloaded: buf.length });
@@ -708,6 +710,7 @@ async function copyFile(
       `/me/drive/items/${targetParentId}:/${encoded}:/content?@microsoft.graph.conflictBehavior=replace`,
       { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf, signal: AbortSignal.timeout(timeoutMs) },
     );
+    if (res.status === 401) throw new TargetRefusing(`Upload of "${name}" is being refused by Microsoft (401).`);
     if (!res.ok) throw new Error(`Upload of "${name}" failed (${res.status}).`);
     liveUpdate(moveId, { uploaded: size });
     onProgress(size);
@@ -717,6 +720,7 @@ async function copyFile(
     // Fresh pre-authenticated URL per (re)open — they expire.
     const url = await getDownloadUrl(sourceAccount, item.id, name);
     const res = await fetch(url, { signal, headers: offset > 0 ? { Range: `bytes=${offset}-` } : {} });
+    if (res.status === 401) throw new SourceRefusing(`Download of "${name}" is being refused by Microsoft (401).`);
     if (offset > 0 && res.status !== 206) throw new Error(`Source ignored the resume range (${res.status}).`);
     if (!res.ok || !res.body) throw new Error(`Download of "${name}" failed (${res.status}).`);
     return res;
@@ -753,6 +757,11 @@ class StallError extends Error {
 class ChunkFatal extends Error {}
 /** The target is refusing this upload (401) — Microsoft-side, usually passes. Retry later. */
 class TargetRefusing extends ChunkFatal {}
+/**
+ * The source refuses downloads (401 `BadContextToken`) — account-wide and Microsoft-side; it
+ * passes on its own (seen 5–35 min). Waited out like TargetRefusing, not burned as attempts.
+ */
+class SourceRefusing extends Error {}
 
 interface SavedUpload {
   key: string;
@@ -806,8 +815,12 @@ async function targetAcceptsUploads(targetAccount: string, targetParentId: strin
       signal: AbortSignal.timeout(60_000),
     });
     await fetch(s.uploadUrl, { method: "DELETE", signal: AbortSignal.timeout(30_000) }).catch(() => {});
+    // A refused session can leave a 0-byte placeholder item behind — remove it.
+    if (r.status !== 202) await graphFetch(targetAccount, `/me/drive/items/${targetParentId}:/.odm-upload-probe`, { method: "DELETE" }).catch(() => {});
     return r.status === 202;
   } catch {
+    // A failed create (e.g. 504) can still leave a 0-byte placeholder item behind.
+    await graphFetch(targetAccount, `/me/drive/items/${targetParentId}:/.odm-upload-probe`, { method: "DELETE" }).catch(() => {});
     return false; // can't tell → assume a spell and keep the saved session
   }
 }
@@ -997,6 +1010,7 @@ async function streamLargeFile(
     } catch (e) {
       if (e instanceof MoveStopped) throw e;
       if (e instanceof ChunkFatal) throw e; // the next attempt re-checks the saved session
+      if (e instanceof SourceRefusing) throw e; // re-opening now won't help; wait it out (runMove)
       // Network drop / stall / early end: re-open the download where the target is.
       fruitless = offset > openedAt ? 0 : fruitless + 1;
       log("warn", "move", "download-reopen", { name, offset, size, fruitless, error: e });

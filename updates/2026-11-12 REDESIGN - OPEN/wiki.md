@@ -111,3 +111,15 @@
   account as a leaked link and briefly invalidates the context.
 - Fix: removed the upload-from-URL attempt entirely (it never worked here and cost ~1 min per
   resume as well). Verified on the next restart: see below.
+- **09:33 resume (after a 29-min pause) — same again, on the 07:15 build that still had the
+  upload-from-URL try:** `server-side-unavailable` at 09:34:44, download 401s from 09:34:48,
+  still going at 10:08. Probed at 09:53: the source's 401 (`BadContextToken`) is
+  **account-wide** — every file on Stage Erdman, every URL variant, even from a fresh process
+  with a freshly refreshed token. Graph metadata calls keep working. The target's saved
+  session and a fresh probe session were both fine (200 / 202).
+  Pause length isn't the trigger — the resume is (each resume = new run = one upload-from-URL try).
+- Hardening (besides removing the try): a source 401 is now `SourceRefusing` — no 9× re-open
+  churn, no "session lost", no attempt burned; it waits like `TargetRefusing` (2-min retries,
+  ≤ 12 h). Simple-upload 401s map to Source/TargetRefusing too. The probe deletes a
+  `.odm-upload-probe` placeholder when its session is refused or its create fails (a 504'd
+  create left a 0-byte one; failed spike sessions left `__odm-*` ones — all cleaned up).
