@@ -61,3 +61,30 @@ export function formatDayMonth(iso: string): string {
 export function daysUntil(iso: string): number {
   return Math.floor((Date.parse(iso) - Date.now()) / MS.day);
 }
+
+/** "850 kB/s" / "1.2 MB/s" / "14 MB/s" — decimal units, one decimal under 10. */
+export function formatRate(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 kB/s";
+  const mb = bytesPerSecond / 1e6;
+  if (mb < 1) return `${Math.max(1, Math.round(bytesPerSecond / 1e3))} kB/s`;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB/s`;
+}
+
+/**
+ * Coarse time left, rounded so it doesn't twitch: "under a minute", "about 25 min",
+ * "1 h 20 min", "about 4½ h", "about 3 days".
+ */
+export function formatTimeLeft(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 60) return "under a minute";
+  const min = seconds / 60;
+  if (min < 60) return `about ${Math.max(5, Math.round(min / 5) * 5)} min`;
+  if (min < 120) {
+    const m = Math.round((min - 60) / 10) * 10;
+    return m === 0 ? "1 h" : m === 60 ? "2 h" : `1 h ${m} min`;
+  }
+  const h = min / 60;
+  if (h >= 48) return `about ${Math.round(h / 24)} days`;
+  const halves = Math.round(h * 2) / 2;
+  return `about ${Math.floor(halves)}${halves % 1 ? "½" : ""} h`;
+}

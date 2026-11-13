@@ -1,7 +1,15 @@
 import { ArrowDown, ArrowUp, Cloud, File as FileIcon, Folder, Laptop, RotateCw } from "lucide-react";
 import type { MoveState } from "@/lib/graph/move";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatRate, formatTimeLeft } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+/** Smoothed speeds (bytes/s) for the running transfer; null = not enough history yet. */
+export interface TransferRates {
+  down: number | null;
+  up: number | null;
+  total: number | null;
+  secondsLeft: number | null;
+}
 
 /**
  * "Now transferring": Source → This Mac → Destination, with what each holds right now,
@@ -9,11 +17,13 @@ import { cn } from "@/lib/utils";
  */
 export function TransferHero({
   move,
+  rates,
   label,
   queuePaused,
   actions,
 }: {
   move: MoveState;
+  rates: TransferRates | null;
   label: (accountId: string) => string;
   queuePaused: boolean;
   actions?: React.ReactNode;
@@ -24,6 +34,10 @@ export function TransferHero({
   const buffer = cur && !cur.serverSide ? Math.max(0, cur.downloaded - cur.uploaded) : 0;
   const retrying = move.isRunning && !!move.error;
   const Icon = move.isFolder ? Folder : FileIcon;
+  const total = flowing ? rates?.total : null;
+  const speedText = total
+    ? [formatRate(total), rates?.secondsLeft != null && `${formatTimeLeft(rates.secondsLeft)} left`].filter(Boolean).join(" · ")
+    : null;
 
   const chip = queuePaused
     ? { text: "Paused", tone: "amber" }
@@ -59,14 +73,14 @@ export function TransferHero({
           figure={formatBytes(move.status === "complete" ? 0 : move.bytesTotal)}
           caption={move.status === "deleting" ? "being removed" : "still on source"}
         />
-        <Connector flowing={flowing} />
+        <Connector flowing={flowing} rate={flowing ? rates?.down : null} />
         <Node
           icon={Laptop}
           title="This Mac"
           figure={cur?.serverSide ? "0 B" : formatBytes(buffer)}
           caption={cur?.serverSide ? "cloud to cloud · not via this Mac" : "in memory · nothing saved to disk"}
         />
-        <Connector flowing={flowing} />
+        <Connector flowing={flowing} rate={flowing ? rates?.up : null} />
         <Node icon={Cloud} title={label(move.targetAccount)} figure={formatBytes(move.bytesDone)} caption="copied so far" />
       </div>
 
@@ -89,8 +103,11 @@ export function TransferHero({
 
       {/* Overall */}
       <div className="flex flex-col gap-2">
-        <div className="flex items-baseline justify-between gap-3">
-          <span className="text-2xl font-semibold tabular-nums">{Math.floor(pct)}%</span>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <span className="flex items-baseline gap-3 whitespace-nowrap">
+            <span className="text-2xl font-semibold tabular-nums">{Math.floor(pct)}%</span>
+            {speedText && <span className="text-xs text-white/50 tabular-nums">{speedText}</span>}
+          </span>
           <span className="text-xs text-white/50 tabular-nums">
             {formatBytes(move.bytesDone)} of {formatBytes(move.bytesTotal)}
             {move.filesDone > 0 && ` · ${move.filesDone.toLocaleString()} files copied`}
@@ -102,7 +119,7 @@ export function TransferHero({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.floor(pct)}
-          aria-valuetext={`${formatBytes(move.bytesDone)} of ${formatBytes(move.bytesTotal)}`}
+          aria-valuetext={`${formatBytes(move.bytesDone)} of ${formatBytes(move.bytesTotal)}${speedText ? `, ${speedText}` : ""}`}
           className="h-2 overflow-hidden rounded-full bg-white/10"
         >
           <div className="h-full rounded-full bg-sky-300 transition-[width] duration-700 ease-out" style={{ width: `${pct}%` }} />
@@ -134,11 +151,23 @@ function Node({
   );
 }
 
-function Connector({ flowing }: { flowing: boolean }) {
+/**
+ * The animated line between two nodes, with its quiet speed label (decorative — the
+ * overall speed below carries the same information for screen readers). The label sits
+ * above the line when it's horizontal (md+) and to its right when it's vertical.
+ */
+function Connector({ flowing, rate }: { flowing: boolean; rate?: number | null }) {
   return (
-    <div aria-hidden className="relative mx-auto h-6 w-px overflow-hidden bg-white/15 md:h-px md:w-16">
-      {flowing && (
-        <span className="absolute inset-y-0 left-0 hidden w-1/4 bg-sky-300 [animation:flow_1.6s_linear_infinite] md:motion-safe:block" />
+    <div aria-hidden className="relative mx-auto">
+      <div className="relative h-6 w-px overflow-hidden bg-white/15 md:h-px md:w-16">
+        {flowing && (
+          <span className="absolute inset-y-0 left-0 hidden w-1/4 bg-sky-300 [animation:flow_1.6s_linear_infinite] md:motion-safe:block" />
+        )}
+      </div>
+      {rate != null && (
+        <span className="absolute top-1/2 left-3 -translate-y-1/2 text-xs whitespace-nowrap text-white/40 tabular-nums md:top-auto md:bottom-1 md:left-1/2 md:-translate-x-1/2 md:translate-y-0">
+          {formatRate(rate)}
+        </span>
       )}
     </div>
   );

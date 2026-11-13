@@ -5,7 +5,8 @@ import { ArrowLeftRight, Check, ChevronDown, Pause, Play, Plus, X } from "lucide
 import type { MoveState } from "@/lib/graph/move";
 import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { TransferHero } from "@/components/transfers/transfer-hero";
+import { TransferHero, type TransferRates } from "@/components/transfers/transfer-hero";
+import { RateMeter } from "@/lib/rate";
 import { IconButton, QueueRow } from "@/components/transfers/queue-row";
 import { AddTransferDialog } from "@/components/transfers/add-transfer-dialog";
 
@@ -26,6 +27,15 @@ export function TransfersView({ accounts }: { accounts: AccountInfo[] }) {
   const [announce, setAnnounce] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const mutating = useRef(false); // ignore polls while an optimistic change is in flight
+  const [rates, setRates] = useState<TransferRates | null>(null);
+  // Per-file down/up speed over 60 s (uploads land in 10 MiB steps, so shorter windows
+  // jump); the overall rate (for time left) over 2 min so the estimate stays calm.
+  const meters = useRef<Meters>({
+    down: new RateMeter(60_000),
+    up: new RateMeter(60_000),
+    total: new RateMeter(120_000, 20_000),
+    moved: { key: "", lastUploaded: 0, bytes: 0 },
+  });
 
   const refresh = useCallback(async () => {
     try {
@@ -34,6 +44,7 @@ export function TransfersView({ accounts }: { accounts: AccountInfo[] }) {
       if (mutating.current) return;
       setMoves(data.moves);
       setPaused(data.paused);
+      setRates(measure(meters.current, data.moves, data.paused));
     } catch {
       /* transient */
     }
@@ -165,6 +176,7 @@ export function TransfersView({ accounts }: { accounts: AccountInfo[] }) {
           {hero && (
             <TransferHero
               move={hero}
+              rates={hero.isRunning ? rates : null}
               label={label}
               queuePaused={paused}
               actions={
@@ -310,4 +322,55 @@ function HeroRemove({
       </div>
     </div>
   );
+}
+
+/**
+ * Feed the meters from one poll and read the speeds back. Speeds only mean something
+ * while bytes are actually moving, so everything resets (and nothing is shown) while
+ * paused, retrying, deleting the source or checking which files are already there.
+ */
+interface Meters {
+  down: RateMeter;
+  up: RateMeter;
+  total: RateMeter;
+  /**
+   * Bytes actually uploaded while watching. Not `bytesDone`: that's a high-water mark
+   * (it can include progress from earlier failed attempts and sit still for a while).
+   */
+  moved: { key: string; lastUploaded: number; bytes: number };
+}
+
+function measure(
+  m: Meters,
+  moves: MoveState[],
+  paused: boolean,
+): TransferRates | null {
+  const run = moves.find((x) => x.isRunning);
+  const cur = run?.current;
+  if (!run || paused || run.error || run.status !== "copying" || !cur) {
+    m.down.reset();
+    m.up.reset();
+    m.total.reset();
+    m.moved = { key: "", lastUploaded: 0, bytes: 0 };
+    return null;
+  }
+  const fileKey = `${run.id}/${cur.name}`;
+  m.down.add(fileKey, cur.downloaded);
+  m.up.add(fileKey, cur.uploaded);
+  const mv = m.moved;
+  if (mv.key !== fileKey) {
+    // A new file: count from 0 if we were already watching this transfer, else start here.
+    mv.lastUploaded = mv.key.startsWith(`${run.id}/`) ? 0 : cur.uploaded;
+    mv.key = fileKey;
+  }
+  mv.bytes += Math.max(0, cur.uploaded - mv.lastUploaded);
+  mv.lastUploaded = cur.uploaded;
+  m.total.add(run.id, mv.bytes);
+  const total = m.total.rate();
+  return {
+    down: cur.serverSide ? null : m.down.rate(),
+    up: cur.serverSide ? null : m.up.rate(),
+    total,
+    secondsLeft: total && total > 0 ? Math.max(0, run.bytesTotal - run.bytesDone) / total : null,
+  };
 }
