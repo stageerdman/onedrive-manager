@@ -74,17 +74,24 @@
   `expirationDateTime`, not a fixed 30 min; (2) raise the simple-upload limit (Graph allows
   up to 250 MB) so small/medium files go via `/content`, which kept working; (3) when a big
   file's session is refused, defer it and keep moving the folder's other files.
-- **Session lifetime (spike `expiry.mts`, `expiry-enforced.mts`):** a personal upload session
-  expires **15 min after its last accepted chunk** (`expirationDateTime` slides per chunk; a
-  status GET doesn't extend it). After expiry both GET and PUT return **401**, not 404 — so
-  an expired session looks exactly like a 401 spell. The old 30-min grace waited on sessions
-  that were already dead.
+- **Session lifetime — the reported expiry is NOT reliable.** Sessions report a 15-min sliding
+  `expirationDateTime` (status GETs don't extend it). A tiny 640 KB test session on Stage
+  Erdman did 401 after 20 min idle (`expiry-enforced.mts`) — but the real 12.7 GB 27-Bonus
+  session on Soren Osha sat idle 53 min (owner's pause, 04:41→05:35) and resumed fine at
+  2.56 GB. So: never give up a session on time alone. A dead session and a 401 spell look
+  identical (both 401), so tell them apart with a live probe instead.
 - **Shipped (code, 2026-11-13; live after the next Mac-app rebuild):**
-  1. Saved session tracks `expiresAt` (from create / every 202 / status); a 401'ing session
-     is waited for until expiry + 2 min, then replaced. 401 refusals (`TargetRefusing`)
-     retry every 2 min without using the 25-attempt budget, for up to 12 h.
+  1. Saved session 401s → `targetAcceptsUploads()` opens a throwaway session in the target
+     folder, sends one chunk of a declared 640 KB file (nothing gets created), deletes it
+     (`probe.mts`: 202 / 204 / no leftover). Probe works → the saved session is dead →
+     new session. Probe fails too → Microsoft spell → keep the session and wait.
+     401 refusals (`TargetRefusing`) retry every 2 min without using the 25-attempt
+     budget, for up to 12 h.
   2. Simple `PUT /content` for files ≤ 60 MB (tested 60 MB on Soren Osha: 201, 84 s).
   3. `lib/spool.ts`: downloaded bytes cached in `data/spool/<moveId>/` (fsync + committed
      length every 64 MiB, stops below 5 GB free) so a replaced session re-uploads from disk
      instead of re-downloading. Test: `npx tsx --tsconfig tsconfig.json --test lib/spool.test.ts`.
   Not done (owner's call): deferring a refused big file to move on with the rest; changing target.
+- Seen 05:35–05:56 after the resume: the source's download URL ignored the Range header
+  ("Source ignored the resume range") for ~20 min, then honoured it. Another Microsoft-side
+  flake; the retry loop rode it out.
