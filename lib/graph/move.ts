@@ -423,6 +423,7 @@ async function runMove(
   db.prepare("UPDATE moves SET status = 'copying', error = NULL, finished_at = NULL WHERE id = ? AND status <> 'deleting'").run(id);
 
   log("info", "move", "run-start", { moveId: id, ...input });
+  let refusingSince: number | null = null;
   for (let attempt = 1; ; attempt++) {
     try {
       await attemptMove(id, input);
@@ -433,6 +434,30 @@ async function runMove(
       if (err instanceof MoveStopped) return onStopped(id, input.targetAccount, err.reason);
       const message = err instanceof Error ? err.message : "Transfer failed.";
       const file = live.get(id);
+      if (err instanceof TargetRefusing) {
+        // Microsoft is refusing uploads to the target for now. Waiting doesn't use up the
+        // retry budget — these spells have lasted 15–60 min — up to REFUSING_MAX_MS.
+        refusingSince ??= Date.now();
+        const waitedMs = Date.now() - refusingSince;
+        log("warn", "move", "target-refusing", { moveId: id, file: file?.name, waitedMins: Math.round(waitedMs / 60_000), error: message });
+        if (waitedMs < REFUSING_MAX_MS) {
+          attempt--;
+          db.prepare("UPDATE moves SET error = ? WHERE id = ?").run(
+            `${message} Microsoft is refusing uploads to this account for now — retrying every ${REFUSING_RETRY_MS / 60_000} min…`,
+            id,
+          );
+          liveClear(id);
+          try {
+            await sleepUnlessStopped(id, REFUSING_RETRY_MS);
+          } catch (e) {
+            if (e instanceof MoveStopped) return onStopped(id, input.targetAccount, e.reason);
+            throw e;
+          }
+          continue;
+        }
+      } else {
+        refusingSince = null;
+      }
       log(attempt >= MAX_ATTEMPTS ? "error" : "warn", "move", "attempt-failed", {
         moveId: id,
         attempt,
@@ -790,8 +815,18 @@ async function uploadFromUrl(
 
 const STALL_MS = 60_000; // no bytes from the source for this long → reconnect
 const CHUNK_TIMEOUT_MS = 3 * 60_000; // one 10 MiB chunk PUT
-/** A saved session that keeps answering 401 is given up on only after this long. */
-const SESSION_GRACE_MS = 30 * 60_000;
+/**
+ * Personal-OneDrive upload sessions expire 15 min after their last accepted chunk (a status
+ * check doesn't extend it), and an expired one answers **401** — the same as Microsoft's
+ * transient 401 spells. So a saved session that 401s is waited for until its own expiry
+ * (plus this margin), then given up on. Used when the expiry isn't known yet.
+ */
+const SESSION_EXPIRY_MARGIN_MS = 2 * 60_000;
+const SESSION_DEFAULT_LIFE_MS = 15 * 60_000;
+/** While the target refuses uploads, retry this often — those waits don't use up attempts. */
+const REFUSING_RETRY_MS = 2 * 60_000;
+/** …but stop waiting (stall for a manual retry) after this long without any progress. */
+const REFUSING_MAX_MS = 12 * 60 * 60_000;
 const MAX_REOPENS_WITHOUT_PROGRESS = 8;
 const LOG_EVERY_MS = 60_000;
 
@@ -803,12 +838,14 @@ class StallError extends Error {
 }
 /** A chunk rejection retrying can't fix (e.g. the upload session is gone). */
 class ChunkFatal extends Error {}
+/** The target is refusing this upload (401) — Microsoft-side, usually passes. Retry later. */
+class TargetRefusing extends ChunkFatal {}
 
 interface SavedUpload {
   key: string;
   uploadUrl: string;
-  /** First time the session refused a status check (Microsoft has transient 401 spells). */
-  failingSince?: number;
+  /** When Microsoft will expire the session (epoch ms; slides forward with every chunk). */
+  expiresAt?: number;
 }
 function loadUpload(moveId: string): SavedUpload | null {
   const r = db.prepare("SELECT upload_json FROM moves WHERE id = ?").get(moveId) as { upload_json: string | null } | undefined;
@@ -824,16 +861,23 @@ async function sessionOffset(uploadUrl: string): Promise<number | null> {
 }
 
 /** `gone` = Microsoft says the session doesn't exist (404/410) — no point waiting for it. */
-async function sessionStatus(uploadUrl: string): Promise<{ offset: number | null; httpStatus: number | null; gone: boolean }> {
+async function sessionStatus(
+  uploadUrl: string,
+): Promise<{ offset: number | null; httpStatus: number | null; gone: boolean; expiresAt?: number }> {
   try {
     const res = await fetch(uploadUrl, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) return { offset: null, httpStatus: res.status, gone: res.status === 404 || res.status === 410 };
-    const body = (await res.json()) as { nextExpectedRanges?: string[] };
+    const body = (await res.json()) as { nextExpectedRanges?: string[]; expirationDateTime?: string };
     const first = body.nextExpectedRanges?.[0];
-    return { offset: first ? Number(first.split("-")[0]) : null, httpStatus: res.status, gone: !first };
+    return { offset: first ? Number(first.split("-")[0]) : null, httpStatus: res.status, gone: !first, expiresAt: parseExpiry(body.expirationDateTime) };
   } catch {
     return { offset: null, httpStatus: null, gone: false };
   }
+}
+
+function parseExpiry(s: string | undefined): number | undefined {
+  const t = s ? Date.parse(s) : NaN;
+  return Number.isFinite(t) ? t : undefined;
 }
 
 async function readWithTimeout(
@@ -850,7 +894,14 @@ async function readWithTimeout(
   }
 }
 
-async function putChunk(uploadUrl: string, chunk: Buffer, start: number, size: number, name: string): Promise<DriveItem | null> {
+/** `item` once the last chunk completes the file; `expiresAt` = the session's new expiry. */
+async function putChunk(
+  uploadUrl: string,
+  chunk: Buffer,
+  start: number,
+  size: number,
+  name: string,
+): Promise<{ item: DriveItem | null; expiresAt?: number }> {
   const end = start + chunk.length - 1;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -861,18 +912,22 @@ async function putChunk(uploadUrl: string, chunk: Buffer, start: number, size: n
         body: new Uint8Array(chunk),
         signal: AbortSignal.timeout(CHUNK_TIMEOUT_MS),
       });
-      if (res.status === 200 || res.status === 201) return (await res.json()) as DriveItem;
-      if (res.status === 202) return null;
+      if (res.status === 200 || res.status === 201) return { item: (await res.json()) as DriveItem };
+      if (res.status === 202) {
+        const body = (await res.json().catch(() => ({}))) as { expirationDateTime?: string };
+        return { item: null, expiresAt: parseExpiry(body.expirationDateTime) };
+      }
       const text = (await res.text().catch(() => "")).slice(0, 300);
       if (res.status === 409 || res.status === 416) {
         // Often an earlier try of this same chunk did land (response lost) — check.
         const have = await sessionOffset(uploadUrl);
         log("warn", "move", "chunk-conflict", { name, status: res.status, start, have, body: text });
-        if (have != null && have >= end + 1) return null;
+        if (have != null && have >= end + 1) return { item: null };
         throw new ChunkFatal(`Chunk upload for "${name}" rejected (${res.status}) at ${start}.`);
       }
       if (res.status !== 429 && res.status < 500) {
         log("error", "move", "chunk-rejected", { name, status: res.status, start, body: text });
+        if (res.status === 401) throw new TargetRefusing(`Upload for "${name}" is being refused by Microsoft (401) — waiting it out.`);
         throw new ChunkFatal(`Chunk upload for "${name}" failed (${res.status}).`);
       }
       lastErr = new Error(`HTTP ${res.status}`);
@@ -914,22 +969,22 @@ async function streamLargeFile(
     if (st.offset != null) {
       uploadUrl = saved.uploadUrl;
       offset = st.offset;
-      if (saved.failingSince) saveUpload(moveId, { key, uploadUrl });
+      saveUpload(moveId, { key, uploadUrl, expiresAt: st.expiresAt ?? saved.expiresAt });
       log("info", "move", "session-resumed", { name, offset, size });
     } else {
-      // A 401 spell can pass; don't throw away gigabytes of progress over one. Keep the
-      // session (the caller retries with backoff) until it has failed for the grace period.
-      const since = saved.failingSince ?? Date.now();
-      if (!st.gone && Date.now() - since < SESSION_GRACE_MS) {
-        saveUpload(moveId, { ...saved, failingSince: since });
-        log("warn", "move", "session-unavailable", { name, httpStatus: st.httpStatus, failingForSecs: Math.round((Date.now() - since) / 1000) });
-        throw new Error(`Upload session for "${name}" is temporarily refusing requests (${st.httpStatus ?? "network"}).`);
+      // A 401 spell can pass, so don't throw away gigabytes of progress over one — but an
+      // expired session also answers 401, so wait only until the session's own expiry.
+      const expiresAt = saved.expiresAt ?? Date.now() + SESSION_DEFAULT_LIFE_MS;
+      if (!st.gone && Date.now() < expiresAt + SESSION_EXPIRY_MARGIN_MS) {
+        if (!saved.expiresAt) saveUpload(moveId, { ...saved, expiresAt });
+        log("warn", "move", "session-unavailable", { name, httpStatus: st.httpStatus, expiresInSecs: Math.round((expiresAt - Date.now()) / 1000) });
+        throw new TargetRefusing(`Upload session for "${name}" is temporarily refusing requests (${st.httpStatus ?? "network"}).`);
       }
       log("warn", "move", "session-expired", { name, httpStatus: st.httpStatus, gone: st.gone });
     }
   }
   if (!uploadUrl) {
-    const session = await graphJson<{ uploadUrl: string }>(
+    const session = await graphJson<{ uploadUrl: string; expirationDateTime?: string }>(
       targetAccount,
       `/me/drive/items/${targetParentId}:/${encodedName}:/createUploadSession`,
       {
@@ -939,7 +994,7 @@ async function streamLargeFile(
       },
     );
     uploadUrl = session.uploadUrl;
-    saveUpload(moveId, { key, uploadUrl });
+    saveUpload(moveId, { key, uploadUrl, expiresAt: parseExpiry(session.expirationDateTime) });
     log("info", "move", "session-created", { name, size });
   }
 
@@ -973,9 +1028,10 @@ async function streamLargeFile(
       let sendAt = offset; // where the next chunk starts (offset = what the target confirmed)
       let inFlight: Promise<void> | null = null;
       const send = (piece: Buffer, start: number) =>
-        putChunk(uploadUrl!, piece, start, size, name).then((item) => {
+        putChunk(uploadUrl!, piece, start, size, name).then(({ item, expiresAt }) => {
           offset = start + piece.length;
           if (item) lastItem = item;
+          if (expiresAt) saveUpload(moveId, { key, uploadUrl: uploadUrl!, expiresAt });
           liveUpdate(moveId, { uploaded: offset });
           onProgress(offset);
           if (Date.now() - lastLog >= LOG_EVERY_MS) {

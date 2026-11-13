@@ -66,6 +66,10 @@ each section. See the INIT update in updates/ for the full build roadmap.
   persist, investigate the upload session (stale session / conflictBehavior).
 
 ## NEXT (top priority next session)
+- 2026-11-13: transfer resilience (session-expiry-aware wait, 401 refusals don't burn
+  retries, simple upload ≤60 MB, on-disk download cache) is committed but NOT built —
+  quit the Mac app, run mac/build-app.sh, reopen. Then watch: grep -E "spool|refusing|session-" data/logs/app.log | tail
+
 - Verify the untested queue paths live with a second real transfer: reorder, preemption
   (moving an item above the running one), and remove (deletes the partial copy on the target).
 - Optional speed-up: overlap the next chunk's download with the current upload. Today each

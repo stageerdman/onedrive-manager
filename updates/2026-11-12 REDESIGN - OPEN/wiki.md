@@ -74,3 +74,17 @@
   `expirationDateTime`, not a fixed 30 min; (2) raise the simple-upload limit (Graph allows
   up to 250 MB) so small/medium files go via `/content`, which kept working; (3) when a big
   file's session is refused, defer it and keep moving the folder's other files.
+- **Session lifetime (spike `expiry.mts`, `expiry-enforced.mts`):** a personal upload session
+  expires **15 min after its last accepted chunk** (`expirationDateTime` slides per chunk; a
+  status GET doesn't extend it). After expiry both GET and PUT return **401**, not 404 — so
+  an expired session looks exactly like a 401 spell. The old 30-min grace waited on sessions
+  that were already dead.
+- **Shipped (code, 2026-11-13; live after the next Mac-app rebuild):**
+  1. Saved session tracks `expiresAt` (from create / every 202 / status); a 401'ing session
+     is waited for until expiry + 2 min, then replaced. 401 refusals (`TargetRefusing`)
+     retry every 2 min without using the 25-attempt budget, for up to 12 h.
+  2. Simple `PUT /content` for files ≤ 60 MB (tested 60 MB on Soren Osha: 201, 84 s).
+  3. `lib/spool.ts`: downloaded bytes cached in `data/spool/<moveId>/` (fsync + committed
+     length every 64 MiB, stops below 5 GB free) so a replaced session re-uploads from disk
+     instead of re-downloading. Test: `npx tsx --tsconfig tsconfig.json --test lib/spool.test.ts`.
+  Not done (owner's call): deferring a refused big file to move on with the rest; changing target.
