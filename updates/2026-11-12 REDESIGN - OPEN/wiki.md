@@ -31,3 +31,17 @@
 - **Throughput.** Each chunk is downloaded, then uploaded, strictly in turn (no overlap), so a
   large file runs at roughly 1/(1/down + 1/up). Overlapping the next chunk's download with the
   current upload is the obvious speed-up if needed.
+
+
+## Upload-session 401 on one account (2026-11-13)
+- Symptom: "27-Bonus Q and A Examples.mp4" (12.7 GB) never progressed. With the new log the
+  first chunk PUT returns **401, empty body**, every time, on a fresh session.
+- Spike (`spike-401/`): on the target **Soren Osha**, a fresh `createUploadSession` URL
+  returns 401 even for a plain GET (session status). `WWW-Authenticate: ... fault="BadContextToken"`.
+  Adding a Bearer token doesn't help. Simple PUT (`/content`) works. The same test on
+  Stage Erdman → 200/201. URL shapes identical → account-side on Microsoft's end.
+  Quota is fine (1 TB free, state normal).
+- Lesson: the old chunk loop's `catch` swallowed non-retryable errors and retried them
+  silently, so this was invisible. Errors now surface in `data/logs/app.log`.
+- Also fixed: download streams had no timeout (one hung at 5.4 MB indefinitely while the
+  heartbeat kept the move "alive"), and retries restarted big files from byte 0.

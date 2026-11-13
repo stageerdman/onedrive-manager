@@ -50,11 +50,16 @@ each section. See the INIT update in updates/ for the full build roadmap.
 ## In progress (resume anytime) — as of 2026-11-12
 - "Jeremy Miner" move (Stage Erdman → Soren Osha, ~65 GB) at ~37 GB / 52%. The queue is
   PAUSED (owner's choice): Transfers tab → Resume. It skips what's already copied.
-- 2026-11-13: the real cause of the 27-Bonus failures was a download stream that stalled with
-  no timeout (hung forever at 5.4 MB), and every retry restarted the 12.7 GB file from byte 0.
-  Fixed: 60s stall watchdog + re-open with Range, upload session saved in moves.upload_json
-  so retries/pauses/restarts resume mid-file, chunk PUT timeouts, persistent log
-  data/logs/app.log. Watch the log to confirm the file completes.
+- 2026-11-13 27-Bonus diagnosis (see REDESIGN wiki "Upload-session 401"):
+  1. FIXED in code: a stalled source download hung forever (no timeout) and every retry
+     restarted the 12.7 GB file from byte 0. Now: 60s stall watchdog + Range re-open, upload
+     session saved in moves.upload_json (resume mid-file), chunk timeouts, data/logs/app.log.
+  2. OPEN, Microsoft-side: the TARGET account (Soren Osha) rejects every upload session —
+     even GET on a brand-new session → 401 fault="BadContextToken". Simple PUTs (<4 MB) to it
+     work; sessions on Stage Erdman work. So no file >4 MB can reach Soren Osha right now.
+     Next: check Soren Osha on onedrive.live.com for a lock/verification banner; try
+     reconnecting that account; re-run spike-401/narrow.mts to confirm.
+  - "Erdman Family" needs reconnecting (never re-consented after the 2026-11-12 Azure swap).
 - Frontier file "27-Bonus Q and A Examples.mp4" (12.7 GB) kept failing with 409. The likely
   cause is an orphaned second server (`next dev` on :3011) uploading it at the same time;
   that server was killed on 2026-11-12. Confirm the 409s are gone after resuming. If they
