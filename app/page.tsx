@@ -1,7 +1,7 @@
 import { AccountCard } from "@/components/account-card";
 import { ConnectSlot } from "@/components/connect-slot";
 import { listAccounts, type Account } from "@/lib/accounts";
-import { getDriveQuota, type DriveQuota } from "@/lib/graph/drive";
+import { getDriveQuotaCached, type DriveQuota } from "@/lib/graph/drive";
 import { ReconnectNeededError } from "@/lib/graph/client";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,7 @@ const MAX_ACCOUNTS = 3;
 async function load(account: Account): Promise<{ account: Account; quota: DriveQuota | null; expired: boolean }> {
   if (account.status === "reconnect") return { account, quota: null, expired: true };
   try {
-    return { account, quota: await getDriveQuota(account.id), expired: false };
+    return { account, quota: await getDriveQuotaCached(account.id), expired: false };
   } catch (err) {
     return { account, quota: null, expired: err instanceof ReconnectNeededError };
   }

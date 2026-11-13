@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft, CircleAlert } from "lucide-react";
 import { getAccount, listAccounts } from "@/lib/accounts";
-import { getDriveQuota } from "@/lib/graph/drive";
+import { getDriveQuotaCached } from "@/lib/graph/drive";
 import { ReconnectNeededError } from "@/lib/graph/client";
 import { ensureChildren, getFolderFetchedAt, getRootId } from "@/lib/graph/scan";
 import { getItem, listChildren } from "@/lib/items";
@@ -19,7 +19,7 @@ async function moveTargets(sourceId: string): Promise<MoveTarget[]> {
     others.map(async (a) => ({
       id: a.id,
       label: a.label,
-      free: await getDriveQuota(a.id).then((q) => q.remaining, () => null),
+      free: await getDriveQuotaCached(a.id).then((q) => q.remaining, () => null),
     })),
   );
 }

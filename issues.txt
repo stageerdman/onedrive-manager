@@ -54,12 +54,12 @@ each section. See the INIT update in updates/ for the full build roadmap.
   1. FIXED in code: a stalled source download hung forever (no timeout) and every retry
      restarted the 12.7 GB file from byte 0. Now: 60s stall watchdog + Range re-open, upload
      session saved in moves.upload_json (resume mid-file), chunk timeouts, data/logs/app.log.
-  2. OPEN, Microsoft-side: the TARGET account (Soren Osha) rejects every upload session —
-     even GET on a brand-new session → 401 fault="BadContextToken". Simple PUTs (<4 MB) to it
-     work; sessions on Stage Erdman work. So no file >4 MB can reach Soren Osha right now.
-     Next: check Soren Osha on onedrive.live.com for a lock/verification banner; try
-     reconnecting that account; re-run spike-401/narrow.mts to confirm.
-  - "Erdman Family" needs reconnecting (never re-consented after the 2026-11-12 Azure swap).
+  2. Transient Microsoft 401s on upload sessions / download URLs (cleared on their own after
+     ~15 min). Handled now: session kept through a 30-min grace, downloads reconnect.
+  3. 27-Bonus resumed mid-file after an app restart (308 MB) and is uploading at ~0.8 MB/s
+     (upload-bound). Track with: grep 27-Bonus data/logs/app.log | tail
+  - "Erdman Family" needs reconnecting (never re-consented after the 2026-11-12 Azure swap) —
+    Settings now has a Reconnect button per account.
 - Frontier file "27-Bonus Q and A Examples.mp4" (12.7 GB) kept failing with 409. The likely
   cause is an orphaned second server (`next dev` on :3011) uploading it at the same time;
   that server was killed on 2026-11-12. Confirm the 409s are gone after resuming. If they

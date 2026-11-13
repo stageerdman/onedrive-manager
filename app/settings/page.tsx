@@ -15,7 +15,13 @@ export default function SettingsPage() {
         ) : (
           <ul className="glass divide-y divide-white/[0.06] rounded-2xl">
             {accounts.map((a) => (
-              <AccountSettingsRow key={a.id} accountId={a.id} email={a.email} label={a.label} />
+              <AccountSettingsRow
+                key={a.id}
+                accountId={a.id}
+                email={a.email}
+                label={a.label}
+                needsReconnect={a.status === "reconnect"}
+              />
             ))}
           </ul>
         )}

@@ -5,15 +5,20 @@ import { useRouter } from "next/navigation";
 import { InlineEditText } from "@/components/inline-edit-text";
 import { clearScanCacheAction, disconnectAccountAction } from "@/app/actions";
 
-/** One account's settings: rename, clear its folder cache, disconnect. */
+/**
+ * One account's settings: rename, reconnect (re-consent with Microsoft — always offered,
+ * prominent once access has expired), clear its folder cache, disconnect.
+ */
 export function AccountSettingsRow({
   accountId,
   email,
   label,
+  needsReconnect,
 }: {
   accountId: string;
   email: string | null;
   label: string;
+  needsReconnect: boolean;
 }) {
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
@@ -35,6 +40,7 @@ export function AccountSettingsRow({
           className="-ml-1.5 text-[15px] font-medium"
         />
         {email && <p className="truncate text-[13px] text-white/50">{email}</p>}
+        {needsReconnect && <p className="text-[13px] text-rose-400">Access expired</p>}
       </div>
 
       {confirming ? (
@@ -58,6 +64,16 @@ export function AccountSettingsRow({
         </span>
       ) : (
         <span className="flex items-center gap-1 text-[13px]">
+          <a
+            href={`/api/auth/login?reconnect=${accountId}`}
+            className={
+              needsReconnect
+                ? "mr-1 rounded-full bg-sky-300 px-3 py-1 font-medium text-neutral-950 transition-colors hover:bg-sky-200"
+                : "rounded-full px-3 py-1 text-white/60 hover:bg-white/10 hover:text-white"
+            }
+          >
+            Reconnect
+          </a>
           <button
             type="button"
             disabled={pending}

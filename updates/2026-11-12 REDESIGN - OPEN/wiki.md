@@ -45,3 +45,16 @@
   silently, so this was invisible. Errors now surface in `data/logs/app.log`.
 - Also fixed: download streams had no timeout (one hung at 5.4 MB indefinitely while the
   heartbeat kept the move "alive"), and retries restarted big files from byte 0.
+
+- **Update, same day:** the 401 was a *transient* Microsoft spell, not a dead account — the
+  same session code started working ~15 min later. After a restart the source's download
+  URLs also returned 401/503 a few times before succeeding: my.microsoftpersonalcontent.com
+  is flaky in both directions. Not the known cause (an Authorization header on the
+  uploadUrl PUT — we don't send one). So: a saved session that 401s is kept for a 30-min
+  grace period instead of being discarded (losing GBs); download 401/503 → reconnect.
+- Throughput: the old loop downloaded a chunk, then uploaded it (lockstep), and
+  `Buffer.concat`'d the whole carry on every read (70% CPU). Now: one chunk in flight while
+  the next downloads, parts joined once per chunk, 10 MiB chunks → 0.55 → 0.8 MB/s, CPU 2%.
+  Download sits exactly one chunk ahead → upload-bound (~1 MB/s, owner's uplink / MS ingest).
+- Tab switches waited 4–30 s on Graph `/me/drive` quota per account. `getDriveQuotaCached`
+  serves the last value from the DB (refreshes in background after 60 s) → ~10 ms.

@@ -25,7 +25,7 @@ import { log } from "@/lib/log";
  * the live per-file download/upload counters are kept in memory for the UI.
  */
 
-const CHUNK = 327_680 * 20; // ~6 MiB, multiple of 320 KiB (upload-session requirement)
+const CHUNK = 327_680 * 32; // 10 MiB, multiple of 320 KiB (upload-session requirement)
 const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
 const HEARTBEAT_MS = 5_000;
 const HEARTBEAT_STALE_MS = 20_000;
@@ -773,7 +773,9 @@ async function uploadFromUrl(
 // --- Large-file streaming: stall-proof and resumable mid-file -------------------------
 
 const STALL_MS = 60_000; // no bytes from the source for this long → reconnect
-const CHUNK_TIMEOUT_MS = 3 * 60_000; // one ~6 MiB chunk PUT
+const CHUNK_TIMEOUT_MS = 3 * 60_000; // one 10 MiB chunk PUT
+/** A saved session that keeps answering 401 is given up on only after this long. */
+const SESSION_GRACE_MS = 30 * 60_000;
 const MAX_REOPENS_WITHOUT_PROGRESS = 8;
 const LOG_EVERY_MS = 60_000;
 
@@ -789,6 +791,8 @@ class ChunkFatal extends Error {}
 interface SavedUpload {
   key: string;
   uploadUrl: string;
+  /** First time the session refused a status check (Microsoft has transient 401 spells). */
+  failingSince?: number;
 }
 function loadUpload(moveId: string): SavedUpload | null {
   const r = db.prepare("SELECT upload_json FROM moves WHERE id = ?").get(moveId) as { upload_json: string | null } | undefined;
@@ -798,16 +802,21 @@ function saveUpload(moveId: string, u: SavedUpload | null): void {
   db.prepare("UPDATE moves SET upload_json = ? WHERE id = ?").run(u ? JSON.stringify(u) : null, moveId);
 }
 
-/** How many bytes an upload session already holds, or null if the session is gone. */
+/** How many bytes an upload session already holds, or null if it can't say right now. */
 async function sessionOffset(uploadUrl: string): Promise<number | null> {
+  return (await sessionStatus(uploadUrl)).offset;
+}
+
+/** `gone` = Microsoft says the session doesn't exist (404/410) — no point waiting for it. */
+async function sessionStatus(uploadUrl: string): Promise<{ offset: number | null; httpStatus: number | null; gone: boolean }> {
   try {
     const res = await fetch(uploadUrl, { signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) return null;
+    if (!res.ok) return { offset: null, httpStatus: res.status, gone: res.status === 404 || res.status === 410 };
     const body = (await res.json()) as { nextExpectedRanges?: string[] };
     const first = body.nextExpectedRanges?.[0];
-    return first ? Number(first.split("-")[0]) : null;
+    return { offset: first ? Number(first.split("-")[0]) : null, httpStatus: res.status, gone: !first };
   } catch {
-    return null;
+    return { offset: null, httpStatus: null, gone: false };
   }
 }
 
@@ -885,13 +894,22 @@ async function streamLargeFile(
 
   const saved = loadUpload(moveId);
   if (saved?.key === key) {
-    const have = await sessionOffset(saved.uploadUrl);
-    if (have != null) {
+    const st = await sessionStatus(saved.uploadUrl);
+    if (st.offset != null) {
       uploadUrl = saved.uploadUrl;
-      offset = have;
+      offset = st.offset;
+      if (saved.failingSince) saveUpload(moveId, { key, uploadUrl });
       log("info", "move", "session-resumed", { name, offset, size });
     } else {
-      log("warn", "move", "session-expired", { name });
+      // A 401 spell can pass; don't throw away gigabytes of progress over one. Keep the
+      // session (the caller retries with backoff) until it has failed for the grace period.
+      const since = saved.failingSince ?? Date.now();
+      if (!st.gone && Date.now() - since < SESSION_GRACE_MS) {
+        saveUpload(moveId, { ...saved, failingSince: since });
+        log("warn", "move", "session-unavailable", { name, httpStatus: st.httpStatus, failingForSecs: Math.round((Date.now() - since) / 1000) });
+        throw new Error(`Upload session for "${name}" is temporarily refusing requests (${st.httpStatus ?? "network"}).`);
+      }
+      log("warn", "move", "session-expired", { name, httpStatus: st.httpStatus, gone: st.gone });
     }
   }
   if (!uploadUrl) {
@@ -930,22 +948,17 @@ async function streamLargeFile(
         clearTimeout(headerTimer);
       }
       const reader = src.body!.getReader();
-      let carry = Buffer.alloc(0);
+      // Pipeline: while one chunk is uploading, keep downloading the next one (the old
+      // download-then-upload lockstep idled each side half the time). Incoming pieces are
+      // collected in a list and joined once per chunk — no re-copying the buffer per read.
+      let parts: Buffer[] = [];
+      let buffered = 0;
       let downloaded = offset;
-      for (;;) {
-        throwIfStopped(moveId);
-        const { value, done } = await readWithTimeout(reader);
-        if (value) {
-          carry = Buffer.concat([carry, Buffer.from(value)]);
-          downloaded += value.length;
-          liveUpdate(moveId, { downloaded });
-        }
-        while (carry.length >= CHUNK || (done && carry.length > 0)) {
-          throwIfStopped(moveId);
-          const piece = carry.subarray(0, Math.min(CHUNK, carry.length));
-          const item = await putChunk(uploadUrl, Buffer.from(piece), offset, size, name);
-          offset += piece.length;
-          carry = carry.subarray(piece.length);
+      let sendAt = offset; // where the next chunk starts (offset = what the target confirmed)
+      let inFlight: Promise<void> | null = null;
+      const send = (piece: Buffer, start: number) =>
+        putChunk(uploadUrl!, piece, start, size, name).then((item) => {
+          offset = start + piece.length;
           if (item) lastItem = item;
           liveUpdate(moveId, { uploaded: offset });
           onProgress(offset);
@@ -955,8 +968,36 @@ async function streamLargeFile(
             lastLog = Date.now();
             lastLogOffset = offset;
           }
+        });
+      try {
+        for (;;) {
+          throwIfStopped(moveId);
+          const { value, done } = await readWithTimeout(reader);
+          if (value) {
+            parts.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+            buffered += value.length;
+            downloaded += value.length;
+            liveUpdate(moveId, { downloaded });
+          }
+          while (buffered >= CHUNK || (done && buffered > 0)) {
+            throwIfStopped(moveId);
+            const all = parts.length === 1 ? parts[0] : Buffer.concat(parts, buffered);
+            const n = Math.min(CHUNK, all.length);
+            const piece = Buffer.from(all.subarray(0, n)); // own copy; the rest stays buffered
+            const rest = all.subarray(n);
+            parts = rest.length ? [rest] : [];
+            buffered = rest.length;
+            if (inFlight) await inFlight; // chunks must land in order
+            inFlight = send(piece, sendAt);
+            sendAt += n;
+          }
+          if (done) break;
         }
-        if (done) break;
+        if (inFlight) await inFlight;
+      } finally {
+        // On a stall/stop, let the chunk already on the wire settle first, so the session's
+        // offset we re-read next is final (no overlapping PUTs).
+        if (inFlight) await (inFlight as Promise<void>).catch(() => {});
       }
       if (!lastItem) {
         if (offset >= size) throw new ChunkFatal(`Upload of "${name}" sent every byte but never completed.`);
@@ -964,10 +1005,7 @@ async function streamLargeFile(
       }
     } catch (e) {
       if (e instanceof MoveStopped) throw e;
-      if (e instanceof ChunkFatal) {
-        saveUpload(moveId, null); // next attempt starts a fresh session
-        throw e;
-      }
+      if (e instanceof ChunkFatal) throw e; // the next attempt re-checks the saved session
       // Network drop / stall / early end: re-open the download where the target is.
       fruitless = offset > openedAt ? 0 : fruitless + 1;
       log("warn", "move", "download-reopen", { name, offset, size, fruitless, error: e });
@@ -976,7 +1014,7 @@ async function streamLargeFile(
       }
       const have = await sessionOffset(uploadUrl);
       if (have == null) {
-        saveUpload(moveId, null);
+        // Leave it saved: the next attempt decides between waiting it out and starting over.
         throw new Error(`Upload session for "${name}" was lost at ${offset}/${size}.`);
       }
       offset = have;
