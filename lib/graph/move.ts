@@ -437,7 +437,7 @@ async function runMove(
         // REFUSING_MAX_MS. The saved upload session (and the spool) keep the progress.
         refusingSince ??= Date.now();
         const waitedMs = Date.now() - refusingSince;
-        log("warn", "move", "target-refusing", { moveId: id, file: file?.name, waitedMins: Math.round(waitedMs / 60_000), error: message });
+        log("warn", "move", err instanceof SourceRefusing ? "source-refusing" : "target-refusing", { moveId: id, file: file?.name, waitedMins: Math.round(waitedMs / 60_000), error: message });
         if (waitedMs < REFUSING_MAX_MS) {
           attempt--;
           db.prepare("UPDATE moves SET error = ? WHERE id = ?").run(
