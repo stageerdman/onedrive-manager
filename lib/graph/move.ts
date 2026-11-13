@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { db, getSetting, setSetting } from "@/lib/db";
 import { graphFetch, graphJson } from "@/lib/graph/client";
 import { log } from "@/lib/log";
+import { pruneSpools, removeMoveSpools, removeSpool, spooledStream } from "@/lib/spool";
 
 /**
  * Cross-account transfers: copy → verify → delete-source (Graph has no native move
@@ -21,12 +22,16 @@ import { log } from "@/lib/log";
  * the same way and starts nothing until resumed. Removing a transfer cleans up its
  * partial copy on the target; the source is never touched.
  *
- * Bytes stream through this machine chunk by chunk (nothing is written to disk);
- * the live per-file download/upload counters are kept in memory for the UI.
+ * Bytes stream through this machine chunk by chunk. Large files are also cached on
+ * disk while in flight (`lib/spool.ts`) so a lost upload session doesn't mean
+ * downloading them again; the live per-file counters are kept in memory for the UI.
  */
 
 const CHUNK = 327_680 * 32; // 10 MiB, multiple of 320 KiB (upload-session requirement)
-const SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024;
+/** Files up to this size go in one PUT to `/content` (Graph allows up to 250 MB). Unlike
+ * upload sessions, it kept working through the target's session 401 spells. Bigger files
+ * always use a resumable upload session. */
+const SIMPLE_UPLOAD_MAX = 60 * 1024 * 1024;
 const HEARTBEAT_MS = 5_000;
 const HEARTBEAT_STALE_MS = 20_000;
 const PAUSED_KEY = "transfers_paused";
@@ -299,6 +304,7 @@ export async function removeMove(id: string): Promise<boolean> {
     return true;
   }
   db.prepare("UPDATE moves SET status = 'cancelled' WHERE id = ?").run(id);
+  await removeMoveSpools(id);
   await deletePartialCopy(id, row.target_account);
   db.prepare("DELETE FROM moves WHERE id = ?").run(id);
   return true;
@@ -323,6 +329,8 @@ export function resumeInterruptedMoves(): void {
     db.prepare("UPDATE moves SET control = NULL WHERE id = ?").run(id);
     void removeMove(id);
   }
+  const keep = db.prepare("SELECT id FROM moves WHERE status NOT IN ('complete', 'cancelled')").all() as { id: string }[];
+  void pruneSpools(new Set(keep.map((r) => r.id)));
   schedule();
 }
 
@@ -419,6 +427,7 @@ async function runMove(
     try {
       await attemptMove(id, input);
       log("info", "move", "run-complete", { moveId: id, attempt });
+      await removeMoveSpools(id);
       return; // success
     } catch (err) {
       if (err instanceof MoveStopped) return onStopped(id, input.targetAccount, err.reason);
@@ -463,6 +472,7 @@ async function onStopped(id: string, targetAccount: string, reason: StopReason):
   }
   db.prepare("UPDATE moves SET status = 'cancelled' WHERE id = ?").run(id);
   saveUpload(id, null);
+  await removeMoveSpools(id);
   await deletePartialCopy(id, targetAccount);
   db.prepare("DELETE FROM moves WHERE id = ?").run(id);
 }
@@ -681,14 +691,16 @@ async function copyFile(
   // Stream through this machine (download from source → upload to target).
   const onProgress = (uploaded: number) => setProgress(moveId, progress.files, progress.bytes + uploaded);
   if (size <= SIMPLE_UPLOAD_MAX) {
-    const src = await resilientFetch(downloadUrl);
+    // Generous but finite: assume at least ~100 KB/s, never less than 2 minutes.
+    const timeoutMs = Math.max(120_000, size / 100);
+    const src = await resilientFetch(downloadUrl, { signal: AbortSignal.timeout(timeoutMs) });
     if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
     const buf = new Uint8Array(await src.arrayBuffer());
     liveUpdate(moveId, { downloaded: buf.length });
     const res = await graphFetch(
       targetAccount,
       `/me/drive/items/${targetParentId}:/${encoded}:/content?@microsoft.graph.conflictBehavior=replace`,
-      { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf },
+      { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: buf, signal: AbortSignal.timeout(timeoutMs) },
     );
     if (!res.ok) throw new Error(`Upload of "${name}" failed (${res.status}).`);
     liveUpdate(moveId, { uploaded: size });
@@ -703,9 +715,13 @@ async function copyFile(
     if (!res.ok || !res.body) throw new Error(`Download of "${name}" failed (${res.status}).`);
     return res;
   };
+  // Same item, same size, same content hashes → the cached bytes are this file's bytes.
+  const spoolKey = `${item.id}|${size}|${JSON.stringify((item.file as { hashes?: unknown } | undefined)?.hashes ?? null)}`;
+  const openSource = (offset: number, signal: AbortSignal) => spooledStream(moveId, spoolKey, offset, signal, openDownload);
   const started = Date.now();
   log("info", "move", "file-start", { moveId, name, size });
-  const result = await streamLargeFile(targetAccount, targetParentId, encoded, name, size, openDownload, onProgress, moveId);
+  const result = await streamLargeFile(targetAccount, targetParentId, encoded, name, size, openSource, onProgress, moveId);
+  await removeSpool(moveId, spoolKey);
   log("info", "move", "file-done", { moveId, name, size, secs: Math.round((Date.now() - started) / 1000) });
   return result;
 }
@@ -884,7 +900,7 @@ async function streamLargeFile(
   encodedName: string,
   name: string,
   size: number,
-  openDownload: (offset: number, signal: AbortSignal) => Promise<Response>,
+  openSource: (offset: number, signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>,
   onProgress: (uploaded: number) => void,
   moveId: string,
 ): Promise<DriveItem> {
@@ -941,13 +957,13 @@ async function streamLargeFile(
     const ctrl = new AbortController();
     try {
       const headerTimer = setTimeout(() => ctrl.abort(new StallError("Download start")), STALL_MS);
-      let src: Response;
+      let src: ReadableStream<Uint8Array>;
       try {
-        src = await openDownload(offset, ctrl.signal);
+        src = await openSource(offset, ctrl.signal);
       } finally {
         clearTimeout(headerTimer);
       }
-      const reader = src.body!.getReader();
+      const reader = src.getReader();
       // Pipeline: while one chunk is uploading, keep downloading the next one (the old
       // download-then-upload lockstep idled each side half the time). Incoming pieces are
       // collected in a list and joined once per chunk — no re-copying the buffer per read.
