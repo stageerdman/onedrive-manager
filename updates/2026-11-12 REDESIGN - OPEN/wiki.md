@@ -123,3 +123,20 @@
   ≤ 12 h). Simple-upload 401s map to Source/TargetRefusing too. The probe deletes a
   `.odm-upload-probe` placeholder when its session is refused or its create fails (a 504'd
   create left a 0-byte one; failed spike sessions left `__odm-*` ones — all cleaned up).
+
+## Why does OneDrive keep refusing? — evidence so far (2026-11-13 ~10:15 UTC)
+- Downtime today (log starts 01:46): 01:48–02:05 upload, 02:15 (1 min) download, 03:04–03:46
+  upload, 05:35–05:56 download, 07:07–07:22 download, 09:34–10:15+ download → ~2¼ h of
+  ~8½ h. 5 of 6 spells began seconds after a resume's upload-from-URL try (removed in cc34da0,
+  live since the 10:09 build). The 03:04 one began mid-upload with no trigger.
+- During the 09:34 spell, **everything on the storage host** (`my.microsoftpersonalcontent.com`)
+  refuses our app for that account — tempauth URLs (any variant, tempauth as Bearer too),
+  the host's `_api/v2.0|v2.1/.../content` with the Graph token, `download.aspx` — all 401
+  `BadContextToken`. `graph.microsoft.com` metadata calls keep working. tempauth is `v1e.`
+  (encrypted claims; readable: appid = our app, exp ≈ +1 h) → nothing to fix client-side.
+- Not tried / open: whether the account's files download fine in onedrive.live.com during a
+  spell (→ app-specific vs account-wide). Our Azure registration is new (2026-11-12) and
+  unverified; no logs exist from the old RecBar registration to compare.
+- Web: rclone's 2024 fixes (aee8d90 downloads, dedad9f uploads) = stop sending Authorization
+  to pre-authed URLs; we never do. Microsoft is retiring tempauth URLs (SharePoint/OneDrive,
+  from 2027-04-01) — consistent with the storage host's auth being in flux.
