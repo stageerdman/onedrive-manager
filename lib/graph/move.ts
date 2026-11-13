@@ -58,7 +58,6 @@ interface LiveFile {
 // progress travel through the database. This is only the runner's own bookkeeping.
 const state = ((globalThis as { __odmMoveRunner?: RunnerState }).__odmMoveRunner ??= {
   running: new Set<string>(),
-  serverSideCap: new Map<string, boolean>(), // moveId -> does upload-from-URL work?
   live: new Map<string, LiveFile>(),
   lastCheck: new Map<string, number>(),
   lastFlush: new Map<string, number>(),
@@ -66,13 +65,12 @@ const state = ((globalThis as { __odmMoveRunner?: RunnerState }).__odmMoveRunner
 });
 type RunnerState = {
   running: Set<string>;
-  serverSideCap: Map<string, boolean>;
   live: Map<string, LiveFile>;
   lastCheck: Map<string, number>;
   lastFlush: Map<string, number>;
   recheck: ReturnType<typeof setTimeout> | null;
 };
-const { running, serverSideCap, live } = state;
+const { running, live } = state;
 const CHECK_EVERY_MS = 750;
 const FLUSH_EVERY_MS = 1_000;
 
@@ -387,7 +385,6 @@ function launch(id: string): void {
       clearInterval(timer);
       db.prepare("UPDATE moves SET heartbeat_at = NULL, live_json = NULL WHERE id = ?").run(id);
       running.delete(id);
-      serverSideCap.delete(id);
       live.delete(id);
       state.lastCheck.delete(id);
       state.lastFlush.delete(id);
@@ -694,25 +691,9 @@ async function copyFile(
   const downloadUrl = await getDownloadUrl(sourceAccount, item.id, name);
   liveStart(moveId, { name, size, downloaded: 0, uploaded: 0, serverSide: false });
 
-  // Try server-to-server (upload-from-URL) ONCE per move. Many personal accounts
-  // reject it ("sourceUrl not supported"); once we learn that, skip it for the rest
-  // of the move and stream directly instead of wasting an attempt on every file.
-  if (serverSideCap.get(moveId) !== false) {
-    try {
-      liveUpdate(moveId, { serverSide: true });
-      const result = await uploadFromUrl(targetAccount, targetParentId, name, downloadUrl, size, moveId, progress);
-      if (serverSideCap.get(moveId) !== true) {
-        serverSideCap.set(moveId, true);
-        log("info", "move", "server-side-works", { moveId });
-      }
-      return result;
-    } catch (e) {
-      serverSideCap.set(moveId, false);
-      liveUpdate(moveId, { serverSide: false, downloaded: 0, uploaded: 0 });
-      log("info", "move", "server-side-unavailable", { moveId, error: e });
-    }
-  }
-
+  // No server-to-server copy: upload-from-URL (`@microsoft.graph.sourceUrl`) is rejected
+  // for personal accounts (400), and every attempt was followed by 1–20 min of 401s on the
+  // source's download URLs (see REDESIGN wiki "Download 401s after resume"). Always stream.
   // Stream through this machine (download from source → upload to target).
   const onProgress = (uploaded: number) => setProgress(moveId, progress.files, progress.bytes + uploaded);
   if (size <= SIMPLE_UPLOAD_MAX) {
@@ -749,66 +730,6 @@ async function copyFile(
   await removeSpool(moveId, spoolKey);
   log("info", "move", "file-done", { moveId, name, size, secs: Math.round((Date.now() - started) / 1000) });
   return result;
-}
-
-async function uploadFromUrl(
-  targetAccount: string,
-  targetParentId: string,
-  name: string,
-  sourceUrl: string,
-  size: number,
-  moveId: string,
-  progress: { files: number; bytes: number },
-): Promise<DriveItem> {
-  const res = await graphFetch(targetAccount, `/me/drive/items/${targetParentId}/children`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Prefer: "respond-async" },
-    body: JSON.stringify({
-      name,
-      file: {},
-      "@microsoft.graph.sourceUrl": sourceUrl,
-      "@microsoft.graph.conflictBehavior": "replace",
-    }),
-  });
-  const monitorUrl = res.headers.get("location");
-  if (res.status !== 202 || !monitorUrl) throw new Error(`Upload-from-URL not accepted (${res.status}).`);
-
-  const started = Date.now();
-  const MAX_MS = 6 * 60 * 60 * 1000;
-  while (Date.now() - started < MAX_MS) {
-    await sleep(3000);
-    throwIfStopped(moveId);
-    let mon: Response;
-    try {
-      mon = await fetch(monitorUrl, { redirect: "manual", headers: { Accept: "application/json" } });
-    } catch {
-      continue; // transient; keep polling
-    }
-    if (mon.status >= 300 && mon.status < 400) {
-      const loc = mon.headers.get("location");
-      if (!loc) throw new Error(`Monitor redirect without location for "${name}".`);
-      return graphJson<DriveItem>(targetAccount, `${loc}?$select=id,name,size`, { absolute: true });
-    }
-    if (mon.status === 200 || mon.status === 202) {
-      const body = await mon.json().catch(() => null);
-      if (body?.id && body?.size !== undefined) return { id: body.id, name: body.name, size: body.size };
-      const status: string | undefined = body?.status;
-      const pct = Number(body?.percentageComplete ?? 0);
-      const moved = Math.floor((size * pct) / 100);
-      liveUpdate(moveId, { downloaded: moved, uploaded: moved });
-      setProgress(moveId, progress.files, progress.bytes + moved);
-      if (status === "completed" && body?.resourceId) {
-        const resourceId = String(body.resourceId).replace(/^driveItem_/, "");
-        return graphJson<DriveItem>(targetAccount, `/me/drive/items/${resourceId}?$select=id,name,size`);
-      }
-      if (status === "failed") throw new Error(`Target failed to fetch "${name}".`);
-    } else if (mon.status === 429 || mon.status >= 500) {
-      continue; // transient
-    } else {
-      throw new Error(`Monitor for "${name}" returned ${mon.status}.`);
-    }
-  }
-  throw new Error(`Upload-from-URL for "${name}" timed out.`);
 }
 
 // --- Large-file streaming: stall-proof and resumable mid-file -------------------------

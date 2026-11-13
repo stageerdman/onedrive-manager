@@ -95,3 +95,19 @@
 - Seen 05:35–05:56 after the resume: the source's download URL ignored the Range header
   ("Source ignored the resume range") for ~20 min, then honoured it. Another Microsoft-side
   flake; the retry loop rode it out.
+
+## Download 401s after resume — caused by the upload-from-URL attempt (2026-11-13)
+- Symptom: after every app start / resume, "Source ignored the resume range (401)" for
+  1–20 min (02:15, 05:35–05:56, 07:07–07:22), then fine on its own.
+- Timeline (app.log): **each** of those spells began 2–4 s after `server-side-unavailable` —
+  the once-per-run upload-from-URL try that hands the source's pre-authenticated download URL
+  to the *target* account (`@microsoft.graph.sourceUrl`; always 400 on personal accounts).
+  The 01:48 and 03:33 upload-session 401 spells also started right after one. 1 of 7 tries
+  (02:27) was not followed by a spell; the 03:04 upload spell had no try before it.
+- During a spell the probe (`download-401.mts`) works again only once it has passed; outside
+  one, every variant works (302 Location / downloadUrl, with / without Range → 200/206).
+  Sending a Bearer header to the pre-authed URL → 401 `BadContextToken` (we never do).
+- Likely mechanism (unconfirmed): Microsoft treats the tempauth URL showing up at another
+  account as a leaked link and briefly invalidates the context.
+- Fix: removed the upload-from-URL attempt entirely (it never worked here and cost ~1 min per
+  resume as well). Verified on the next restart: see below.

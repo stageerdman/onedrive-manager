@@ -78,7 +78,7 @@ export function TransferHero({
           icon={Laptop}
           title="This Mac"
           figure={cur?.serverSide ? "0 B" : formatBytes(buffer)}
-          caption={cur?.serverSide ? "cloud to cloud · not via this Mac" : "in memory · nothing saved to disk"}
+          caption={cur?.serverSide ? "cloud to cloud · not via this Mac" : "downloaded, waiting to upload"}
         />
         <Connector flowing={flowing} rate={flowing ? rates?.up : null} />
         <Node icon={Cloud} title={label(move.targetAccount)} figure={formatBytes(move.bytesDone)} caption="copied so far" />
