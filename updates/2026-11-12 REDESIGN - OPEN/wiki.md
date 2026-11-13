@@ -58,3 +58,19 @@
   Download sits exactly one chunk ahead → upload-bound (~1 MB/s, owner's uplink / MS ingest).
 - Tab switches waited 4–30 s on Graph `/me/drive` quota per account. `getDriveQuotaCached`
   serves the last value from the DB (refreshes in background after 60 s) → ~10 ms.
+
+## Second 401 spell + alternatives spike (2026-11-13, ~03:05–03:45 UTC)
+- 27-Bonus reached 2 GB (16%), then Soren Osha's upload sessions 401'd again
+  (`BadContextToken`) for 40+ min. The 30-min grace expired → fresh session → 2 GB lost.
+- `spike-401/alternatives.mts`: during the spell, on Soren Osha: Graph v1 + beta upload
+  sessions → 401 (even a 640 KB one); **simple `PUT …/content` → 201**. Stage Erdman: all 201.
+  So it is the target's upload-session service only, not the token/account/quota.
+- `spike-401/legacy-api.mts`: legacy `api.onedrive.com` rejects our Graph token (401) —
+  would need a separate auth flow; not worth it.
+- Web: the documented cause (Authorization header on the uploadUrl PUT; rclone fixed this
+  in 2024) doesn't apply — we never send it. Other reports are account-specific with no
+  Microsoft answer. Nothing to fix on our side except resilience.
+- Resilience ideas: (1) keep a session until it's actually gone (404/410) or past its
+  `expirationDateTime`, not a fixed 30 min; (2) raise the simple-upload limit (Graph allows
+  up to 250 MB) so small/medium files go via `/content`, which kept working; (3) when a big
+  file's session is refused, defer it and keep moving the folder's other files.
