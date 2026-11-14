@@ -319,17 +319,35 @@ export function clearFinishedMoves(): void {
  * the scheduler picks the top one and continues it where it left off.
  */
 export function resumeInterruptedMoves(): void {
-  // Finish removals whose runner died before it could clean up.
-  const orphans = db
-    .prepare("SELECT id FROM moves WHERE control = 'remove' AND (heartbeat_at IS NULL OR heartbeat_at < ?)")
-    .all(Date.now() - HEARTBEAT_STALE_MS) as { id: string }[];
-  for (const { id } of orphans) {
-    db.prepare("UPDATE moves SET control = NULL WHERE id = ?").run(id);
-    void removeMove(id);
-  }
+  finishOrphanedRemovals();
   const keep = db.prepare("SELECT id FROM moves WHERE status NOT IN ('complete', 'cancelled')").all() as { id: string }[];
   void pruneSpools(new Set(keep.map((r) => r.id)));
   schedule();
+}
+
+/**
+ * Finish removals whose runner died before it could clean up. A remove-flagged row is
+ * never scheduled, so if its runner is gone nobody else will ever touch it. Its last
+ * heartbeat may still look fresh (the app restarted seconds after the remove), so look
+ * again once it would have gone stale.
+ */
+function finishOrphanedRemovals(): void {
+  const rows = db.prepare("SELECT id, heartbeat_at FROM moves WHERE control = 'remove'").all() as {
+    id: string;
+    heartbeat_at: number | null;
+  }[];
+  let recheckIn = 0;
+  for (const r of rows) {
+    if (running.has(r.id)) continue; // our own runner will clean up
+    const age = r.heartbeat_at == null ? Infinity : Date.now() - r.heartbeat_at;
+    if (age < HEARTBEAT_STALE_MS) {
+      recheckIn = Math.max(recheckIn, HEARTBEAT_STALE_MS - age + 1000);
+      continue;
+    }
+    db.prepare("UPDATE moves SET control = NULL WHERE id = ?").run(r.id);
+    void removeMove(r.id).then(() => schedule());
+  }
+  if (recheckIn) setTimeout(finishOrphanedRemovals, recheckIn);
 }
 
 /**
@@ -839,16 +857,36 @@ async function readWithTimeout(
   }
 }
 
-async function putChunk(uploadUrl: string, chunk: Buffer, start: number, size: number, name: string): Promise<DriveItem | null> {
+/** An AbortSignal that fires (with a MoveStopped reason) once the transfer is told to stop. */
+function stopSignal(id: string): { signal: AbortSignal; dispose: () => void } {
+  const ctrl = new AbortController();
+  const timer = setInterval(() => {
+    const reason = stopReason(id);
+    if (reason) ctrl.abort(new MoveStopped(reason));
+  }, 1000);
+  return { signal: ctrl.signal, dispose: () => clearInterval(timer) };
+}
+
+async function putChunk(
+  moveId: string,
+  uploadUrl: string,
+  chunk: Buffer,
+  start: number,
+  size: number,
+  name: string,
+): Promise<DriveItem | null> {
   const end = start + chunk.length - 1;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 6; attempt++) {
+    throwIfStopped(moveId);
+    const stop = stopSignal(moveId);
     try {
       const res = await fetch(uploadUrl, {
         method: "PUT",
         headers: { "Content-Length": String(chunk.length), "Content-Range": `bytes ${start}-${end}/${size}` },
         body: new Uint8Array(chunk),
-        signal: AbortSignal.timeout(CHUNK_TIMEOUT_MS),
+        // A hung PUT must not hold up a pause/remove for the full timeout.
+        signal: AbortSignal.any([AbortSignal.timeout(CHUNK_TIMEOUT_MS), stop.signal]),
       });
       if (res.status === 200 || res.status === 201) return (await res.json()) as DriveItem;
       if (res.status === 202) return null;
@@ -867,11 +905,13 @@ async function putChunk(uploadUrl: string, chunk: Buffer, start: number, size: n
       }
       lastErr = new Error(`HTTP ${res.status}`);
     } catch (e) {
-      if (e instanceof ChunkFatal) throw e;
+      if (e instanceof ChunkFatal || e instanceof MoveStopped) throw e;
       lastErr = e;
+    } finally {
+      stop.dispose();
     }
     log("warn", "move", "chunk-retry", { name, start, attempt: attempt + 1, error: lastErr });
-    await sleep(Math.min(2 ** attempt, 30) * 1000);
+    await sleepUnlessStopped(moveId, Math.min(2 ** attempt, 30) * 1000);
   }
   throw lastErr instanceof Error ? lastErr : new Error("Chunk upload failed");
 }
@@ -961,7 +1001,7 @@ async function streamLargeFile(
       let sendAt = offset; // where the next chunk starts (offset = what the target confirmed)
       let inFlight: Promise<void> | null = null;
       const send = (piece: Buffer, start: number) =>
-        putChunk(uploadUrl!, piece, start, size, name).then((item) => {
+        putChunk(moveId, uploadUrl!, piece, start, size, name).then((item) => {
           offset = start + piece.length;
           if (item) lastItem = item;
           liveUpdate(moveId, { uploaded: offset });
