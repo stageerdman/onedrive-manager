@@ -717,7 +717,7 @@ async function copyFile(
   const onProgress = (uploaded: number) => setProgress(moveId, progress.files, progress.bytes + uploaded);
   if (size <= SIMPLE_UPLOAD_MAX) {
     // Generous but finite: assume at least ~100 KB/s, never less than 2 minutes.
-    const timeoutMs = Math.max(120_000, size / 100);
+    const timeoutMs = Math.max(120_000, Math.ceil(size / 100)); // timers need an integer
     const src = await resilientFetch(downloadUrl, { signal: AbortSignal.timeout(timeoutMs) });
     if (src.status === 401) throw new SourceRefusing(`Download of "${name}" is being refused by Microsoft (401).`);
     if (!src.ok) throw new Error(`Download of "${name}" failed (${src.status}).`);
