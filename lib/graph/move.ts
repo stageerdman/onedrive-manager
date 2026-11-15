@@ -637,9 +637,16 @@ async function copyFolder(
   }
 }
 
+/**
+ * Only a 404 means "gone". Anything else (401/429/5xx — Microsoft refuses transiently and
+ * often) must throw so the pass retries; treating it as gone once made a duplicate target
+ * folder ("Jeremy Miner 1") and re-copied 35 GB that was already there.
+ */
 async function itemExists(account: string, itemId: string): Promise<boolean> {
   const res = await graphFetch(account, `/me/drive/items/${itemId}?$select=id`);
-  return res.ok;
+  if (res.ok) return true;
+  if (res.status === 404) return false;
+  throw new Error(`Couldn't check the destination folder (${res.status}).`);
 }
 
 async function listChildrenLive(account: string, folderId: string): Promise<DriveItem[]> {
